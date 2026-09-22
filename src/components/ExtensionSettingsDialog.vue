@@ -86,6 +86,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   notify: '发送系统通知',
   events: '广播扩展事件',
   'shared-storage': '读写跨扩展共享存储',
+  webview: '在原生窗口里打开外部网站（顶层窗口，可登录）',
 }
 
 function permissionLabel(perm: string): string {

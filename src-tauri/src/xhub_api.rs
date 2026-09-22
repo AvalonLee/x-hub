@@ -426,6 +426,25 @@ pub(crate) static CAPABILITIES: &[Capability] = &[
         permission: None,
         handler: CapabilityHandler::Async(service_request),
     },
+    // ----- 外部网页窗口（顶层导航打开外部站点，实现见 web_window.rs）-----
+    Capability {
+        namespace: "webview",
+        method: "open",
+        permission: Some("webview"),
+        handler: CapabilityHandler::Async(webview_open),
+    },
+    Capability {
+        namespace: "webview",
+        method: "close",
+        permission: Some("webview"),
+        handler: CapabilityHandler::Async(webview_close),
+    },
+    Capability {
+        namespace: "webview",
+        method: "state",
+        permission: Some("webview"),
+        handler: CapabilityHandler::Sync(webview_state),
+    },
 ];
 
 /// 暴露全部能力表（供 extension.rs 在扫描时做 requires 能力校验）。
@@ -2098,6 +2117,63 @@ fn events_emit(
     _args: Value,
 ) -> Result<Value, String> {
     Ok(Value::Null)
+}
+
+// ---------- webview（在原生窗口里打开外部站点，需 webview 权限） ----------
+
+/// webview.open：把外部站点开在 x-hub 的原生网页窗口里（**顶层导航**）。
+///
+/// 参数 `{ url, title?, reload? }` → `{ open: true, url }`。
+///
+/// 为什么必须走原生窗口、而不是扩展自己的 iframe：外部站点普遍拒绝被嵌入
+/// （实测 `chat.deepseek.com` 回 `frame-ancestors 'none'`，通义 / Qwen / 秘塔回白名单，
+/// ChatGPT / Grok / Perplexity / Gemini 回 `X-Frame-Options: SAMEORIGIN|DENY`），
+/// 而扩展四种形态全由 iframe 承载 —— 嵌进去必然白屏。顶层导航不受该限制，
+/// 且 Cookie 是第一方、登录态可持久、流式对话正常。详见 `web_window.rs`。
+///
+/// 地址由 `web_window::validate_url` 校验：**只放行 https 公网站点**
+/// （拒 `http`/`file`/`javascript`/`data`、拒 IP 字面量与 localhost/内网名）。
+///
+/// 用异步 handler（同 `fs_save_as` 口径）：本函数要操作 WebView2 窗口，
+/// 同步 handler 跑在主线程，与窗口操作交错有阻塞风险。
+fn webview_open(
+    app: tauri::AppHandle,
+    _ext_id: String,
+    args: Value,
+) -> BoxFuture<Result<Value, String>> {
+    Box::pin(async move {
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "INVALID_ARGUMENT: 缺少 url".to_string())?;
+        let title = args.get("title").and_then(|v| v.as_str()).map(str::to_string);
+        let reload = args.get("reload").and_then(|v| v.as_bool()).unwrap_or(false);
+        let target = crate::web_window::open(&app, url, title.as_deref(), reload)?;
+        Ok(json!({ "open": true, "url": target }))
+    })
+}
+
+/// webview.close：收起外部网页窗口（隐藏常驻，页面与登录态都保留，重开即恢复现场）
+fn webview_close(
+    app: tauri::AppHandle,
+    _ext_id: String,
+    _args: Value,
+) -> BoxFuture<Result<Value, String>> {
+    Box::pin(async move {
+        crate::web_window::hide(&app);
+        Ok(json!({ "open": false }))
+    })
+}
+
+/// webview.state：查询外部网页窗口状态 → `{ open, url }`（扩展据此渲染「已打开」态）
+fn webview_state(
+    app: &tauri::AppHandle,
+    _state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    let s = crate::web_window::state(app);
+    serde_json::to_value(s).map_err(|e| e.to_string())
 }
 
 // ---------- service ----------

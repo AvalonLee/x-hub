@@ -474,6 +474,35 @@ interface XHubService {
   ): Promise<XHubHttpResult>
 }
 
+/**
+ * @done 在 x-hub 的**原生网页窗口**里打开外部网站（需 `webview` 权限）。
+ *
+ * 这是打开外部站点的**唯一可行方式**：扩展的四种形态全由 iframe 承载，而外部站点普遍用
+ * `Content-Security-Policy: frame-ancestors` 或 `X-Frame-Options` 拒绝被嵌入
+ * （实测 `chat.deepseek.com` 回 `frame-ancestors 'none'`，通义 / Qwen / 秘塔回白名单，
+ * ChatGPT / Grok / Perplexity / Gemini 回 `SAMEORIGIN|DENY`）—— 嵌 iframe 必然白屏。
+ * 本接口走**顶层导航**，不受 frame-ancestors 约束，且 Cookie 是第一方，
+ * 登录态可持久、流式对话（SSE）正常。
+ *
+ * 约束：只放行 `https` 公网地址 —— `http` / `file` / `javascript` / `data`、IP 字面量、
+ * `localhost` 与 `.local` / `.internal` 内网名一律被拒。
+ *
+ * 语义：窗口**常驻复用**。重复 `open` 同一个 url 不会重新加载（正在进行的对话不会丢）；
+ * 要强制重载传 `{ reload: true }`。`close` 只是**隐藏**，页面与登录态都保留，重开即恢复现场。
+ */
+interface XHubWebview {
+  /** @done 打开（或唤起）外部网页窗口。`title` 为系统标题栏文字（缺省沿用上次） */
+  open(opts: {
+    url: string
+    title?: string
+    reload?: boolean
+  }): Promise<{ open: boolean; url: string }>
+  /** @done 收起窗口（隐藏常驻，不销毁页面、不丢登录态） */
+  close(): Promise<{ open: boolean }>
+  /** @done 查询窗口状态：`open` = 当前是否可见，`url` = 已请求加载的地址（未打开过为空串） */
+  state(): Promise<{ open: boolean; url: string }>
+}
+
 /** @done 宿主主题令牌（window.xhub.theme.get() 返回，同时自动注入为 --xhub-* CSS 变量） */
 interface XHubThemeTokens {
   /** 强调色 */
@@ -574,6 +603,7 @@ interface XHub {
   clipboard: XHubClipboard
   net: XHubNet
   service: XHubService
+  webview: XHubWebview
   theme: XHubThemeApi
   ui: XHubUi
   system: XHubSystem

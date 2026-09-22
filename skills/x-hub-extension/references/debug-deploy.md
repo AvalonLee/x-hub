@@ -56,7 +56,7 @@
 **最后一条最容易中招**：预检会**静态扫描**扩展目录里的 `.html/.js/.mjs/.cjs`（跳过 `.` 开头的文件和 `node_modules`），把出现的每一处 `xhub.…` 调用链拿出来，反推它需要什么权限，再和 `manifest.permissions` 对账。规则是：
 
 - `data.*` 中方法名以 `create/update/delete/set/toggle/reorder/import/schedule` 开头 → `data:write`，其余 → `data:read`
-- `ui.*` → `notify`｜`net.*` → `network`｜`system.*` → `system`｜`clipboard.*` → `clipboard`｜`fs.*` → `fs`｜`sharedStorage.*` → `shared-storage`｜`events.emit` → `events`
+- `ui.*` → `notify`｜`net.*` → `network`｜`system.*` → `system`｜`clipboard.*` → `clipboard`｜`fs.*` → `fs`｜`sharedStorage.*` → `shared-storage`｜`events.emit` → `events`｜`webview.*` → `webview`
 - `runtime.*` / `storage.*` / `config.*` / `theme.*` / `service.*` / `expose` → 无需权限
 
 ⚠️ 扫描是**纯文本匹配**，所以**注释、字符串、示例代码里写的 `xhub.data.notes.create(...)` 也会被算作「用到了」**——要么补声明，要么别在注释里写这种调用示例。

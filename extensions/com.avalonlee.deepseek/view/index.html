@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek</title>
+  <style>
+    /* ---- 主题：双声明 fallback（无宿主预览时也有正确的深浅色） ---- */
+    :root {
+      color-scheme: light;
+      --surface: var(--xhub-surface, rgba(255, 255, 255, 0.66));
+      --well: var(--xhub-bg-card, rgba(255, 255, 255, 0.9));
+      --ink: var(--xhub-text-1, #1f2230);
+      --ink-2: var(--xhub-text-2, #5b6070);
+      --ink-3: var(--xhub-text-3, #8b90a2);
+      --line: var(--xhub-border, rgba(0, 0, 0, 0.1));
+      --primary: var(--xhub-accent, #4d6bfe);
+      --brand: var(--xhub-brand, #4d6bfe);
+      --brand-soft: var(--xhub-brand-soft, rgba(77, 107, 254, 0.12));
+      --green: var(--xhub-green, #18a058);
+      --radius: var(--xhub-radius-lg, 12px);
+      --on-primary: #ffffff;
+    }
+    :root[data-xhub-theme="dark"] {
+      color-scheme: dark;
+      --surface: var(--xhub-surface, rgba(255, 255, 255, 0.06));
+      --well: var(--xhub-bg-card, rgba(255, 255, 255, 0.04));
+      --ink: var(--xhub-text-1, #e8e9f0);
+      --ink-2: var(--xhub-text-2, #a2a7b8);
+      --ink-3: var(--xhub-text-3, #7d8298);
+      --line: var(--xhub-border, rgba(255, 255, 255, 0.12));
+      --primary: var(--xhub-accent, #8b8bff);
+      --brand: var(--xhub-brand, #7f96ff);
+      --brand-soft: var(--xhub-brand-soft, rgba(127, 150, 255, 0.16));
+      --green: var(--xhub-green, #3fd18a);
+      /* 暗色主题的 accent 是浅色 → 实底上的文字用深色 */
+      --on-primary: #14161f;
+    }
+
+    /* 铁律：页面底用 --xhub-page-bg（无壁纸 = 宿主页面背景；有壁纸 = transparent） */
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+      box-sizing: border-box;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 13px;
+      background: var(--xhub-page-bg, transparent);
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 680px; margin: 0 auto; }
+
+    /* ---------- 头部 ---------- */
+    .hero { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    .hero-logo { flex: none; width: 40px; height: 40px; }
+    .hero-text { min-width: 0; flex: 1; }
+    .hero-text h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+    .hero-text p { margin: 2px 0 0; font-size: 12px; color: var(--ink-2); }
+
+    .badge {
+      flex: none;
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 9px; border-radius: 999px;
+      font-size: 11.5px; line-height: 1.4;
+      background: var(--well); border: 1px solid var(--line); color: var(--ink-2);
+    }
+    .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+    .badge.is-open { color: var(--green); border-color: color-mix(in oklab, var(--green) 40%, transparent); }
+    .badge.is-open .dot { background: var(--green); }
+
+    /* ---------- 操作区 ---------- */
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    button {
+      font: inherit; font-size: 13px;
+      padding: 8px 16px; border-radius: 9px;
+      border: 1px solid var(--line); background: var(--well); color: var(--ink);
+      cursor: pointer; transition: border-color .15s, opacity .15s;
+    }
+    button:hover:not(:disabled) { border-color: var(--primary); }
+    button:disabled { opacity: .5; cursor: default; }
+    .btn-primary {
+      background: var(--primary); border-color: transparent;
+      color: var(--on-primary); font-weight: 600; padding-inline: 20px;
+    }
+    .btn-primary:hover:not(:disabled) { opacity: .9; border-color: transparent; }
+    .btn-ghost { background: transparent; color: var(--ink-2); }
+
+    .meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-3); margin-bottom: 20px; }
+    .meta .err { color: var(--xhub-red, #e5484d); }
+
+    /* ---------- 说明卡 ---------- */
+    .note {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .note h2 {
+      margin: 0 0 8px; font-size: 12px; font-weight: 600;
+      color: var(--ink-2); letter-spacing: .02em;
+    }
+    .note p { margin: 0 0 8px; line-height: 1.65; color: var(--ink-2); }
+    .note p:last-child { margin-bottom: 0; }
+    .note b { color: var(--ink); font-weight: 600; }
+    .note code {
+      font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+      padding: 1px 5px; border-radius: 5px;
+      background: var(--brand-soft); color: var(--brand);
+    }
+    .tip {
+      display: flex; gap: 8px; align-items: flex-start;
+      padding-top: 10px; margin-top: 2px;
+      border-top: 1px solid var(--line);
+    }
+
+    /* 壁纸透底态：去白描边、留落影、文字加黑柔光晕（口径同宿主 .card） */
+    :root[data-xhub-wallpaper-clear="1"] .note {
+      border-color: transparent;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    }
+    :root[data-xhub-wallpaper-clear="1"] .badge { border-color: rgba(255, 255, 255, 0.16); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <img class="hero-logo" src="../icon.svg" alt="" />
+      <div class="hero-text">
+        <h1>DeepSeek</h1>
+        <p>网页版 · 在 x-hub 的原生窗口里打开</p>
+      </div>
+      <span class="badge" id="badge"><i class="dot"></i><span id="badge-text">未打开</span></span>
+    </header>
+
+    <div class="actions">
+      <button class="btn-primary" id="btn-open">打开 DeepSeek</button>
+      <button id="btn-close" hidden>收起窗口</button>
+      <button class="btn-ghost" id="btn-reload">重新加载</button>
+    </div>
+
+    <div class="meta">
+      <span id="meta-last">尚未打开过</span>
+      <span id="meta-count"></span>
+      <span class="err" id="meta-err"></span>
+    </div>
+
+    <section class="note">
+      <h2>为什么开在独立窗口里</h2>
+      <p>
+        DeepSeek 官网明确拒绝被网页嵌入（响应头 <code>frame-ancestors 'none'</code>），
+        直接嵌进扩展页面只会白屏。x-hub 改为开一个<b>原生窗口</b>做顶层导航 ——
+        不受该限制，Cookie 是第一方，<b>登录态能持久、流式回复也正常</b>。
+      </p>
+      <p class="tip">
+        <span>窗口是<b>常驻复用</b>的：收起后再打开会回到原来的对话现场，不会重新加载。
+        只有点「重新加载」才会强制刷新页面。</span>
+      </p>
+    </section>
+  </div>
+
+  <script>
+    // 桥 API 由宿主注入，不要 import 任何包。
+    // 站点地址写在这里（宿主只校验协议与主机，不维护站点白名单，加站点不用重编译宿主）。
+    const SITE_URL = 'https://chat.deepseek.com/'
+    const SITE_TITLE = 'DeepSeek'
+
+    const $ = (id) => document.getElementById(id)
+    const badge = $('badge')
+    const badgeText = $('badge-text')
+    const btnOpen = $('btn-open')
+    const btnClose = $('btn-close')
+    const btnReload = $('btn-reload')
+    const metaLast = $('meta-last')
+    const metaCount = $('meta-count')
+    const metaErr = $('meta-err')
+
+    /** 宿主桥是否可用（浏览器直接预览时为 false） */
+    let bridgeReady = false
+    let stats = { opens: 0, lastAt: 0 }
+
+    function fail(e) {
+      const code = e && e.code ? e.code : 'ERROR'
+      const msg = e && e.message ? e.message : String(e)
+      metaErr.textContent = `${code}：${msg}`
+    }
+
+    function clearErr() { metaErr.textContent = '' }
+
+    function fmtTime(ms) {
+      if (!ms) return ''
+      const d = new Date(ms)
+      const pad = (n) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+
+    function renderStats() {
+      metaLast.textContent = stats.lastAt ? `上次打开：${fmtTime(stats.lastAt)}` : '尚未打开过'
+      metaCount.textContent = stats.opens > 0 ? `累计 ${stats.opens} 次` : ''
+    }
+
+    /** 把窗口状态画到界面上（`open` = 窗口当前是否可见） */
+    function renderState(state) {
+      const open = !!(state && state.open)
+      badge.classList.toggle('is-open', open)
+      badgeText.textContent = open ? '已打开' : '未打开'
+      btnOpen.textContent = open ? '唤起窗口' : '打开 DeepSeek'
+      btnClose.hidden = !open
+    }
+
+    async function refreshState() {
+      if (!bridgeReady) return
+      try {
+        renderState(await window.xhub.webview.state())
+      } catch (e) {
+        fail(e)
+      }
+    }
+
+    async function openSite(reload) {
+      clearErr()
+      if (!bridgeReady) {
+        fail({ code: 'NO_BRIDGE', message: '不在 x-hub 里运行（浏览器预览无此能力）' })
+        return
+      }
+      try {
+        renderState(await window.xhub.webview.open({ url: SITE_URL, title: SITE_TITLE, reload: !!reload }))
+        stats.opens += 1
+        stats.lastAt = Date.now()
+        renderStats()
+        void window.xhub.storage.set('stats', stats)
+      } catch (e) {
+        fail(e)
+      }
+    }
+
+    btnOpen.addEventListener('click', () => openSite(false))
+    btnReload.addEventListener('click', () => openSite(true))
+    btnClose.addEventListener('click', async () => {
+      clearErr()
+      if (!bridgeReady) return
+      try {
+        await window.xhub.webview.close()
+        renderState({ open: false })
+      } catch (e) {
+        fail(e)
+      }
+    })
+
+    // boot：storage 是异步的，先读回数据再首绘，不要在顶层同步读
+    async function boot() {
+      try {
+        const info = await window.xhub.runtime.info()
+        // 能力探测走运行期真实能力表：宿主没实现 webview.* 时优雅降级，而不是点下去才炸
+        const caps = info.capabilities || []
+        const declared = caps.some((c) => c.namespace === 'webview' && c.method === 'open')
+        // 双保险：能力表说有 ≠ 桥脚本真封装了。宿主若注册了 webview 能力却没在
+        // window.xhub 上挂 webview 命名空间，只查能力表会误判为就绪，随后
+        // 第一次 refreshState 就 TypeError（"reading 'state'"）。两者都成立才算就绪。
+        bridgeReady = declared && !!(window.xhub && window.xhub.webview)
+        if (!bridgeReady) {
+          btnOpen.disabled = true
+          btnReload.disabled = true
+          fail({
+            code: declared ? 'NO_BRIDGE' : 'NO_CAPABILITY',
+            message: declared
+              ? '宿主未把 webview 能力挂到桥 API 上，请升级 x-hub'
+              : '当前 x-hub 版本未提供 webview 能力，请升级宿主',
+          })
+        }
+      } catch (e) {
+        fail(e)
+      }
+
+      if (bridgeReady) {
+        try {
+          const saved = await window.xhub.storage.get('stats')
+          if (saved && typeof saved === 'object') stats = { opens: saved.opens || 0, lastAt: saved.lastAt || 0 }
+        } catch (_) { /* 统计读不到不影响主流程 */ }
+      }
+      renderStats()
+      await refreshState()
+    }
+
+    renderState({ open: false })
+    boot()
+    // 状态轮询：窗口可能被用户直接关闭（系统标题栏的 ×），界面要跟上
+    setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshState()
+    }, 5000)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void refreshState()
+    })
+  </script>
+</body>
+</html>

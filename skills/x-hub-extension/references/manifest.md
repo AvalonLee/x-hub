@@ -34,7 +34,7 @@
 
 ## 权限 `permissions`
 
-可选值：`data:read`、`data:write`、`fs`、`clipboard`、`network`、`system`、`notify`、`events`（广播自定义事件）、`shared-storage`（跨扩展共享存储）。
+可选值：`data:read`、`data:write`、`fs`、`clipboard`、`network`、`system`、`notify`、`events`（广播自定义事件）、`shared-storage`（跨扩展共享存储）、`webview`（在原生窗口里打开外部网站）。
 
 没声明就调用会被拒（`PERMISSION_DENIED`）。各权限与桥 API 的对应关系见 `bridge-api.md`。
 

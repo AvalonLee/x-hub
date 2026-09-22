@@ -1,0 +1,17 @@
+{
+  "id": "com.avalonlee.deepseek",
+  "name": "DeepSeek",
+  "version": "1.0.0",
+  "runtime": "web",
+  "kind": "view",
+  "surfaces": ["view", "module"],
+  "openIn": ["view"],
+  "entry": {
+    "view": "./view/index.html",
+    "module": "./module/index.html"
+  },
+  "icon": "./icon.svg",
+  "description": "在 x-hub 的原生窗口里打开 DeepSeek 网页版——登录态可持久、流式对话正常",
+  "permissions": ["webview"],
+  "requires": ["webview.open", "webview.state", "webview.close"]
+}

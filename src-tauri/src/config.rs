@@ -122,6 +122,17 @@ pub struct AppConfig {
     /// AI 对话独立窗口是否置顶（自制标题栏的图钉按钮切换）
     #[serde(default)]
     pub chat_window_pinned: bool,
+    /// 外部网页窗口宽度（逻辑 px，由窗口缩放拖拽记忆；见 `web_window.rs`）
+    #[serde(default = "default_web_window_width")]
+    pub web_window_width: f64,
+    /// 外部网页窗口高度（逻辑 px）
+    #[serde(default = "default_web_window_height")]
+    pub web_window_height: f64,
+    /// 外部网页窗口位置（物理 px，拖动松手后由后端记忆，与对话独立窗同约定）
+    #[serde(default)]
+    pub web_window_x: Option<f64>,
+    #[serde(default)]
+    pub web_window_y: Option<f64>,
     /// 剪贴板历史全局呼出快捷键（默认 Ctrl+Alt+V，可配置）
     pub clipboard_shortcut: String,
     /// 剪贴板历史最大条数（含置顶；置顶豁免自动清理但计入上限）
@@ -263,6 +274,15 @@ fn default_chat_window_height() -> f64 {
     640.0
 }
 
+/// 外部网页窗口默认尺寸：按「能舒服地看一整页对话」定（桌面 1080p 下不铺满）
+fn default_web_window_width() -> f64 {
+    1200.0
+}
+
+fn default_web_window_height() -> f64 {
+    860.0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -359,6 +379,10 @@ impl Default for AppConfig {
             chat_window_x: None,
             chat_window_y: None,
             chat_window_pinned: false,
+            web_window_width: default_web_window_width(),
+            web_window_height: default_web_window_height(),
+            web_window_x: None,
+            web_window_y: None,
             clipboard_shortcut: crate::shortcut::DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,
@@ -519,6 +543,11 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "chat_window_x",
     "chat_window_y",
     "chat_window_pinned",
+    // 外部网页窗口：几何由拖拽/缩放记忆（web_window.rs）
+    "web_window_width",
+    "web_window_height",
+    "web_window_x",
+    "web_window_y",
     // 悬浮球：开关经 save_settings、位置由 drag_end 记忆
     "floating_ball_enabled",
     "floating_ball_auto_hide",
@@ -549,6 +578,8 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
 pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     // 独立窗几何/开关（chat_window::preserve_disk_fields）
     crate::chat_window::preserve_disk_fields(merged, disk);
+    // 外部网页窗几何（web_window::preserve_disk_fields）
+    crate::web_window::preserve_disk_fields(merged, disk);
     merged.chat_models = disk.chat_models.clone();
     merged.floating_ball_enabled = disk.floating_ball_enabled;
     merged.floating_ball_auto_hide = disk.floating_ball_auto_hide;
@@ -746,6 +777,10 @@ mod tests {
             chat_window_x: Some(111.0),
             chat_window_y: Some(222.0),
             chat_window_pinned: true,
+            web_window_width: 1234.0,
+            web_window_height: 888.0,
+            web_window_x: Some(555.0),
+            web_window_y: Some(666.0),
             floating_ball_enabled: false,
             floating_ball_auto_hide: false,
             floating_ball_with_main: true,
@@ -810,6 +845,10 @@ mod tests {
         assert_eq!(merged.chat_window_x, disk.chat_window_x);
         assert_eq!(merged.chat_window_y, disk.chat_window_y);
         assert_eq!(merged.chat_window_pinned, disk.chat_window_pinned);
+        assert_eq!(merged.web_window_width, disk.web_window_width);
+        assert_eq!(merged.web_window_height, disk.web_window_height);
+        assert_eq!(merged.web_window_x, disk.web_window_x);
+        assert_eq!(merged.web_window_y, disk.web_window_y);
         assert_eq!(merged.floating_ball_enabled, disk.floating_ball_enabled);
         assert_eq!(merged.floating_ball_auto_hide, disk.floating_ball_auto_hide);
         assert_eq!(

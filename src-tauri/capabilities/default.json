@@ -12,7 +12,8 @@
     "todo-float",
     "floating-ball",
     "chat",
-    "notice"
+    "notice",
+    "web-1"
   ],
   "permissions": [
     "core:default",

@@ -950,6 +950,18 @@ pub(crate) const XHUB_BRIDGE_SCRIPT: &str = r#"
           });
       }
     },
+    // webview 命名空间：在 x-hub 的原生窗口里打开外部站点（**需 webview 权限**）。
+    // 外部站点不能 iframe 嵌（frame-ancestors / X-Frame-Options 拒绝）→ 只能由宿主开
+    // 顶层导航的原生窗口。参数形状与文档一致，统一收对象（同 data.* 写方法风格）：
+    // open({url,title?,reload?}) / close() / state()。
+    webview:{
+      open:function(opts){
+        opts=opts||{};
+        return call('webview','open',{url:opts.url,title:opts.title,reload:!!opts.reload});
+      },
+      close:function(){return call('webview','close',{});},
+      state:function(){return call('webview','state',{});}
+    },
     theme:{
       get:function(){return call('theme','get',{});}
     },
@@ -1281,6 +1293,42 @@ mod tests {
                 "桥脚本缺少 data 能力封装: {}.{}",
                 cap.namespace,
                 cap.method
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_script_covers_all_capability_namespaces() {
+        // 凡在 CAPABILITIES 里注册过的命名空间，桥脚本都必须有同名封装块。
+        // 漏了 = 扩展写 `window.xhub.<ns>.xxx()` 拿到 `undefined`，报
+        // 「Cannot read properties of undefined (reading 'xxx')」；更糟的是
+        // `runtime.info().capabilities` 仍宣称该能力存在，扩展的能力探测会误判为可用
+        // ——2026-09-22 的 webview 漏封装事故正是这一条（本用例即其兜底）。
+        // 新增命名空间时务必同步桥脚本，或让扩展一律走 `xhub.call(ns, method, args)` 通用通道。
+        let mut seen: Vec<&str> = Vec::new();
+        for cap in crate::xhub_api::CAPABILITIES.iter() {
+            if seen.contains(&cap.namespace) {
+                continue;
+            }
+            seen.push(cap.namespace);
+            let needle = format!("    {}:{{", cap.namespace);
+            assert!(
+                XHUB_BRIDGE_SCRIPT.contains(&needle),
+                "桥脚本缺少命名空间封装块: {}（扩展会拿到 undefined）",
+                cap.namespace
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_script_covers_webview_capabilities() {
+        // webview 三个方法全部走 call 通道（不像 runtime.open / events.emit 走 postMessage），
+        // 因此逐个方法名对账：漏一个 = 该方法在扩展侧静默 undefined
+        for method in ["open", "close", "state"] {
+            let needle = format!("'webview','{method}'");
+            assert!(
+                XHUB_BRIDGE_SCRIPT.contains(&needle),
+                "桥脚本缺少 webview 能力封装: webview.{method}"
             );
         }
     }

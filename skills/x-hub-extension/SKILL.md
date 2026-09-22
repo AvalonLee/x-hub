@@ -145,6 +145,7 @@ skill 的使用者手里通常只有**装好的 x-hub 应用** + 这个 skill �
 | 存文件到系统下载目录 | `fs` |
 | 跨扩展共享存储 | `shared-storage` |
 | 广播事件给其它扩展 | `events` |
+| **在原生窗口里打开外部网站**（把 DeepSeek / Kimi 等网页版搬进 x-hub） | `webview` |
 | service 后端（后端自己发请求、前端走 `service.request`） | **无需权限** |
 | 后端要**对外**监听（局域网 / `0.0.0.0`） | `network` |
 

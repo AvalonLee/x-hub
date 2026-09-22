@@ -4,7 +4,8 @@
 # 而 cargo 的测试 exe 不经 tauri-build 的 manifest 嵌入（后者只作用于 bin 目标），
 # 缺激活上下文时 loader 用 comctl32 5.82 解析导入，进程启动即死。
 # 处理：cargo test --no-run 后给每个测试 exe 嵌入 src-tauri/windows/app.manifest（幂等），
-# 再运行测试（指纹未变不会重链，嵌入保持有效）。
+# 然后**直接运行这些 exe**——不能再把控制权交回 cargo：它会因 exe 被外部修改而重链，
+# 把刚嵌进去的 manifest 冲掉（详见文末第 3 步的实测记录）。
 param(
   [string[]]$TestArgs = @()
 )
@@ -33,6 +34,29 @@ foreach ($exe in $artifacts) {
 }
 Write-Host ("已为 {0} 个测试 exe 嵌入 Common-Controls v6 manifest" -f @($artifacts).Count)
 
-# 3) 运行测试
-cargo test --manifest-path $cargoToml @TestArgs
-exit $LASTEXITCODE
+# 3) 运行测试：**直接跑刚嵌过 manifest 的测试 exe，不要经过 cargo**。
+#    实测（2026-09-22）：`cargo test` 会检测到 exe 被 mt 改过（mtime 变了）→ 判定产物过期 →
+#    **重新链接** → 把嵌好的 RT_MANIFEST 覆盖回默认 → 又缺激活上下文，测试进程
+#    STATUS_ENTRYPOINT_NOT_FOUND 启动即死（与源码无关，纯构建链路问题）。
+#    直接执行 exe 绕开重链，等价于 `cargo test` 的运行阶段。
+#    TestArgs 里的 cargo 选择器（--lib / --bins / --test …）已在第 1 步消费；
+#    只有 `--` 之后的 harness 参数（--nocapture / --test-threads …）才转发给 exe。
+$harnessArgs = @()
+$afterDash = $false
+foreach ($a in $TestArgs) {
+  if ($a -eq '--') { $afterDash = $true; continue }
+  if ($afterDash) { $harnessArgs += $a }
+}
+# 默认单线程：`commands::tests` 有两个平台额度用例共享**进程内全局轮询游标**
+# （`chat::PLATFORM_RR`，见「平台免费额度」一节），并行跑会互相推游标，导致
+# `legacy_session_with_concrete_platform_name_still_load_balances` 的 `assert_ne!` 偶发失败
+# （实测 2026-09-22：多线程 238/239，单线程 239/239 —— 与源码无关的用例间竞态）。
+# 要并行自己传：`npm run tauri:test -- -- --test-threads=8`。
+if ($harnessArgs.Count -eq 0) { $harnessArgs = @('--test-threads=1') }
+$failed = 0
+foreach ($exe in $artifacts) {
+  Write-Host ("--- 运行测试 exe：{0} ---" -f $exe)
+  & $exe @harnessArgs
+  if ($LASTEXITCODE -ne 0) { $failed = $LASTEXITCODE }
+}
+exit $failed

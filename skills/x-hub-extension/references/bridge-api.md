@@ -15,6 +15,7 @@
 | `data.*` 写方法 | `data:write` |
 | `sharedStorage.*` | `shared-storage` |
 | `fs.saveText` / `saveFile` / `saveAs` | `fs` |
+| `webview.open` / `close` / `state` | `webview` |
 | `events.emit` | `events` |
 | `events.on`、`xhub.expose` | 无需权限 |
 | `net.fetch`（**@planned 未实现**） | `network` |
@@ -60,10 +61,21 @@ window.xhub.expose('getData', fn)           // 暴露方法给其它扩展（配
 await window.xhub.service.request('/api/x', { method, headers, body })  // 仅 service 扩展
 // → XHubHttpResult { status, headers, text(), json() }
 
+// ---- 在原生窗口里打开外部网站（需 webview 权限）----
+// ⚠️ 外部站点**不能**用 iframe 嵌：主流 AI 网页版一律回 frame-ancestors / X-Frame-Options
+// 拒绝被嵌入，而扩展四种形态全由 iframe 承载 —— 嵌进去必然白屏。要带用户去外部网站，
+// 只有这一条路：宿主开一个原生窗口走**顶层导航**，Cookie 是第一方，登录态可持久。
+await window.xhub.webview.open({ url: 'https://chat.deepseek.com/', title: 'DeepSeek' })
+// → { open: true, url: 'https://chat.deepseek.com/' }；只放行 https 公网地址
+await window.xhub.webview.state()   // → { open, url }（渲染「已打开」态用）
+await window.xhub.webview.close()   // 只隐藏，页面与登录态都保留；重开即恢复现场
+// 重复 open 同一个 url **不会**重新加载（对话不丢）；要强制重载传 { reload: true }
+
 // ---- 把文件存到「系统下载」目录（需 fs 权限；单文件 ≤64MB，重名自动去重）----
-await window.xhub.fs.saveText({ name, content })   // 文本 → { path, name }
-await window.xhub.fs.saveFile({ name, base64 })    // 二进制 → { path, name }
-await window.xhub.fs.saveAs({ name, base64 })      // 弹系统「保存到…」对话框；取消返回 { canceled: true }
+// ⚠️ 参数是**位置参数**，不是对象（与 data.* 写方法的对象风格不同，别照抄那边）
+await window.xhub.fs.saveText(name, content)   // 文本 → { path, name }
+await window.xhub.fs.saveFile(name, base64)    // 二进制 → { path, name }
+await window.xhub.fs.saveAs(name, base64)      // 弹系统「保存到…」对话框；取消返回 { canceled: true }
 ```
 
 ### 宿主数据 `data.*`（读写两套都已实装）

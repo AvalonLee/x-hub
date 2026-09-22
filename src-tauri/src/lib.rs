@@ -36,6 +36,7 @@ mod todo_reminder;
 mod todo_recurrence;
 mod tray;
 pub mod updater;
+mod web_window;
 mod win_taskbar;
 mod xhub_api;
 
@@ -443,6 +444,10 @@ pub fn run() {
             // AI 对话独立窗口（无条件预创建隐藏常驻，运行期绝不建窗，详见 chat_window.rs）
             chat_window::init(app.handle());
 
+            // 预创建外部网页窗口（隐藏常驻，初值 about:blank）：原生窗口顶层导航外部站点，
+            // 不受站点 frame-ancestors 约束，扩展的 view/module 形态只做入口（详见 web_window.rs）
+            web_window::init(app.handle());
+
             // 关闭事件：拦截默认关闭，改为隐藏至托盘
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
@@ -616,6 +621,9 @@ pub fn run() {
             chat_window::chat_window_set_pinned,
             chat_window::chat_window_save_mode,
             chat_window::chat_window_open_settings,
+            web_window::web_window_open,
+            web_window::web_window_close,
+            web_window::web_window_state,
             commands::get_app_info,
             commands::clipboard_list,
             commands::clipboard_copy,

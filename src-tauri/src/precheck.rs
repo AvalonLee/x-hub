@@ -136,6 +136,8 @@ fn permission_for(ns: &str, method: &str) -> Option<&'static str> {
         "net" => Some("network"),
         "system" => Some("system"),
         "clipboard" => Some("clipboard"),
+        // 在原生窗口里打开外部站点（顶层导航，见 web_window.rs）
+        "webview" => Some("webview"),
         "fs" => Some("fs"),
         "sharedStorage" => Some("shared-storage"),
         "events" => {
@@ -364,6 +366,10 @@ mod tests {
         assert_eq!(permission_for("data", "create"), Some("data:write"));
         assert_eq!(permission_for("data", "toggle"), Some("data:write"));
         assert_eq!(permission_for("fs", "saveText"), Some("fs"));
+        // 外部网页窗口三个方法（open/close/state）都挂同一个 webview 权限
+        assert_eq!(permission_for("webview", "open"), Some("webview"));
+        assert_eq!(permission_for("webview", "close"), Some("webview"));
+        assert_eq!(permission_for("webview", "state"), Some("webview"));
         assert_eq!(permission_for("events", "emit"), Some("events"));
         assert_eq!(permission_for("events", "on"), None);
         assert_eq!(permission_for("storage", "set"), None);
