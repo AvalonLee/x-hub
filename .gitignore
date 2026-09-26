@@ -59,3 +59,6 @@ article-assets/
 
 # 一次性 UI 校验页（无头浏览器截图用，不进构建、不进仓库）
 dev-dialog-preview/
+
+# 本地文档（含 ADR / 原型 / 方案稿），只留本地不入库
+/docs/
