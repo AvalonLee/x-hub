@@ -11,7 +11,8 @@ import { useStore } from '../stores/workbench'
  *   - 布局项记住用户选的形态（DashPlacement.variant），真实工作台按形态渲染对应内容
  *   - 老数据无 variant → 回退模块 defaultVariant，天然兼容
  * - 模块库：左侧「未放置」模块；画布：右侧「已放置」模块，单实例（左右二选一）
- * - 拖入 = 放置（按当前形态推荐尺寸落位）；画布内拖动 = 移动；右下角拖拽 = 调整尺寸（钳制到形态最小尺寸）；删除 = 退回左侧库
+ * - 拖入 = 放置（按当前形态**最小尺寸**落位，扩展最小可 1×1，放下后再按需放大）；
+ *   画布内拖动 = 移动；右下角拖拽 = 调整尺寸（钳制到形态最小尺寸）；删除 = 退回左侧库
  * - 自由布局：模块放到哪就落在哪（不左上贪心压实）；目标被占时自动向下找最近空位落位（不弹回）
  * - 草稿语义：进入编辑器 beginEdit 快照，确认 commitEdit 才写库，未确认切走 cancelEdit 恢复编辑前
  * - 持久化到应用配置（AppConfig.dashboard_layout，经 Rust config.json 落盘）；浏览器预览回退 localStorage
@@ -21,7 +22,8 @@ import { useStore } from '../stores/workbench'
  */
 
 export const DASH_COLS = 12
-export const MIN_SIZE = 2
+/** 全局尺寸下限：1×1 起步（扩展可声明 1×1 的最小形态，内置模块的形态 min 本就 ≥ 各自内容下限） */
+export const MIN_SIZE = 1
 
 /** 自定义标题最大长度（编辑器输入框与解析共用一个口径） */
 export const TITLE_MAX = 24
@@ -448,7 +450,8 @@ const hasSavedDefault = computed(() => savedDefaultRaw.value.trim().length > 0)
 
 /** 加载声明 module 形态的扩展，注册进工作台模块库（id 用 `ext:<扩展id>` 前缀与内置模块区分）。
  *  manifest.moduleVariants 声明的形态直接进模块库（形态芯片 / 尺寸钳制 / 适配徽标全生效）；
- *  未声明则注册单个默认形态（沿用历史 min 2×2 / ideal 4×3）。 */
+ *  未声明则注册单个默认形态（min 1×1 / ideal 4×3）——拖入按最小尺寸落位，小部件类扩展
+ *  放下来就是 1×1，不必先占 4×3 再缩。 */
 export async function loadExtensionModules() {
   if (!isTauri()) return
   try {
@@ -468,7 +471,7 @@ export async function loadExtensionModules() {
                   const idealH = Math.max(minH, Math.round(mv.idealH) || minH)
                   return v(mv.id, mv.name, minW, minH, idealW, idealH, mv.name)
                 })
-              : [v('module', '扩展', 2, 2, 4, 3, e.name)]
+              : [v('module', '扩展', 1, 1, 4, 3, e.name)]
           return {
             id: `ext:${e.id}`,
             title: e.name,
@@ -560,14 +563,17 @@ function addModule(id: string, x: number, y: number, variant?: string): boolean 
   if (placements.value.some((p) => p.id === id)) return false
   const vd = dashVariantDef(id, variant) ?? dashVariantDef(id)
   if (!vd) return false
-  // 目标位置被占时自动向下找最近的空位，拖入的模块总能落进布局（按所选形态推荐尺寸落位）
-  const spot = findFreeSpot(placements.value, vd.idealW, vd.idealH, x, y)
+  // 按所选形态的最小尺寸落位（扩展可小到 1×1——小部件类扩展不必先占一大格再缩），
+  // 目标位置被占时自动向下找最近的空位，拖入的模块总能落进布局
+  const w = Math.max(1, vd.minW)
+  const h = Math.max(1, vd.minH)
+  const spot = findFreeSpot(placements.value, w, h, x, y)
   placements.value.push({
     id,
     x: spot.x,
     y: spot.y,
-    w: vd.idealW,
-    h: vd.idealH,
+    w,
+    h,
     variant: vd.id,
   })
   persistIfIdle()

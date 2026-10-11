@@ -26,7 +26,7 @@ import WeatherCard from './WeatherCard.vue'
 /**
  * 工作台布局编辑器（形态驱动 + 所见即所得）：
  * - 12×15 棋盘，列间距 / 卡片圆角与真实工作台一致（gap 16、radius-lg），画布即真实工作台的等比缩略
- * - 模块库：多形态模块先选形态再拖入（拖入按所选形态推荐尺寸落位）
+ * - 模块库：多形态模块先选形态再拖入（拖入按所选形态最小尺寸落位，扩展最小可 1×1）
  * - 画布：clock/weather 挂载真实组件，其余模块用 DashModulePreview（结构逐一对齐真实卡片，
  *   尺寸按 --dp-k 等比缩印）；每格带适配徽标
  *   绿=正好铺满 / 黄=紧凑可读 / 蓝=弹性空间 / 红=低于最小（缩放钳制到形态最小尺寸）
@@ -185,15 +185,16 @@ function startMove(id: string, source: 'library' | 'canvas', e: PointerEvent) {
     mode: 'move',
     id,
     source,
-    // 画布内移动沿用模块当前实际尺寸（用户可能已缩放过），库区拖入用所选形态推荐尺寸
-    w: p?.w ?? vd.idealW,
-    h: p?.h ?? vd.idealH,
+    // 画布内移动沿用模块当前实际尺寸（用户可能已缩放过），库区拖入按所选形态最小尺寸
+    // 预览/落位（与 addModule 同口径，扩展最小可 1×1）
+    w: p?.w ?? Math.max(1, vd.minW),
+    h: p?.h ?? Math.max(1, vd.minH),
     col: 0,
     row: 0,
     origX: p?.x ?? 0,
     origY: p?.y ?? 0,
-    origW: p?.w ?? vd.idealW,
-    origH: p?.h ?? vd.idealH,
+    origW: p?.w ?? Math.max(1, vd.minW),
+    origH: p?.h ?? Math.max(1, vd.minH),
     startX: e.clientX,
     startY: e.clientY,
     started: false,
