@@ -1249,6 +1249,10 @@ export const tauriApi = {
   getRunningProcesses: () => invoke<string[]>('get_running_processes'),
   importIconFile: (source: string) =>
     invoke<string | null>('import_icon_file', { source }),
+  /** 手动修复图标缓存：全量检查速达自动提取的图标（手动导入/favicon 不动），
+   *  重提模糊/鬼影缓存；返回 检查数 / 重提数 / 失败数（失败保留旧图） */
+  sweepStaleIcons: () =>
+    invoke<{ scanned: number; reextracted: number; failed: number }>('sweep_stale_icons'),
   importWallpaper: (source: string) =>
     invoke<string>('import_wallpaper', { source }),
   /** 清理壁纸目录中当前配置（亮/暗）均未引用的文件；前端先改配置再调用 */

@@ -750,19 +750,8 @@ pub fn run() {
                 });
             }
 
-            // 低清图标缓存升级：启动 15s 后一次性后台清扫（逐个串行，IO 前释放 DB 锁）。
-            // 旧 PowerShell 链路只产出 32×32 缓存，高分屏发糊；此处就地重提为 256×256，
-            // 图标路径不变（键 = target 哈希），前端下次挂载/重启即见高清图。
-            {
-                let handle = app.handle().clone();
-                std::thread::Builder::new()
-                    .name("icon-sweep".into())
-                    .spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(15));
-                        commands::sweep_stale_icons(&handle);
-                    })
-                    .ok();
-            }
+            // 低清图标缓存升级已改为手动触发（2026-10-11）：速达页右上角「修复图标」
+            // 按钮调用 sweep_stale_icons 命令，按需清扫/重提不健康缓存——不再启动扫全量。
 
             log::info!("x-hub 启动完成");
             Ok(())
@@ -875,6 +864,7 @@ pub fn run() {
             commands::hide_to_tray,
             commands::parse_dropped_path,
             commands::import_icon_file,
+            commands::sweep_stale_icons,
             commands::import_wallpaper,
             commands::cleanup_wallpapers,
             commands::import_note_image,

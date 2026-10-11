@@ -3072,60 +3072,63 @@ fn batch_extract_icons(apps: &[(String, String)]) -> Result<Vec<Option<String>>,
     Ok(result)
 }
 
-/// 图标缓存清扫（启动 15s 后一次性后台跑，见 lib.rs）：
-/// 把不健康的缓存按 target 键就地重提——含旧 PowerShell 链路的 32×32 低清缓存
-/// （宽度判旧），**以及 v0.7.6 一度产出的「小帧居中垫图」鬼影缓存**（宽度是
-/// 256、字形墨迹只占中间一小块，须解码看墨迹，icon_cache_usable 统一判定）。
-/// 只处理「资源图标路径 == target 的缓存键」的条目——用户手动导入的图标
-/// （键 = 图标文件路径哈希）与网页 favicon（fav- 前缀）不越权重置；
-/// 重提失败保留旧图。图标路径不变，前端下次挂载/重启即见修复图。
-pub fn sweep_stale_icons(app: &tauri::AppHandle) {
-    use tauri::Manager;
+/// 图标缓存清扫统计（速达页「修复图标」手动触发后的结果）。
+#[derive(serde::Serialize)]
+pub struct IconSweepSummary {
+    /// 检查的自动提取键条目数（去重后；手动导入/favicon 不在统计内）
+    pub scanned: usize,
+    /// 判为不健康并重提的缓存数
+    pub reextracted: usize,
+    /// 重提失败数（失败项保留旧图）
+    pub failed: usize,
+}
 
-    let Some(state) = app.try_state::<DbState>() else {
-        return;
-    };
-    // 读完全量资源立刻放锁：后续 COM 提取是秒级 IO，不能攥着 DB 互斥锁
+/// 图标缓存清扫（速达页右上角「修复图标」手动触发；2026-10-11 前为启动 15s
+/// 自动跑，按需求改为手动）：把不健康的缓存按 target 键就地重提——含旧
+/// PowerShell 链路的 32×32 低清缓存（宽度判旧），**以及 v0.7.6 一度产出的
+/// 「小帧居中垫图」鬼影缓存**（宽度是 256、字形墨迹只占中间一小块，须解码看
+/// 墨迹，icon_cache_usable 统一判定）。只处理「资源图标路径 == target 的缓存键」
+/// 的条目——用户手动导入的图标（键 = 图标文件路径哈希）与网页 favicon（fav- 前缀）
+/// 不越权重置；重提失败保留旧图。图标路径不变，前端清扫完成后带版本参数刷新。
+/// 必须 async + spawn_blocking：全量解码 PNG 与 COM 提取是秒级 IO，同步命令会
+/// 卡死主线程冻结 UI（同 scan_installed_apps）。
+#[tauri::command]
+pub async fn sweep_stale_icons(state: tauri::State<'_, DbState>) -> Result<IconSweepSummary, String> {
+    // 读完全量资源立刻放锁：后续解码/COM 提取是秒级 IO，不能攥着 DB 互斥锁
     let resources = {
-        let Ok(conn) = state.0.lock() else {
-            return;
-        };
-        match crate::repo::resource::list_all(&conn) {
-            Ok(rs) => rs,
-            Err(e) => {
-                log::warn!("图标清扫：读取资源列表失败: {e}");
-                return;
+        let conn = state.0.lock().map_err(|_| "数据库不可用".to_string())?;
+        crate::repo::resource::list_all(&conn).map_err(|e| format!("读取资源列表失败: {e}"))?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut scanned = 0usize;
+        let mut stale: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in &resources {
+            let Some(icon) = &r.icon else { continue };
+            // 只认自动提取键（icon == hash(target).png），手动导入/favicon 不动
+            if icon_cache_path(&r.target) != std::path::PathBuf::from(icon) {
+                continue;
+            }
+            if !seen.insert(r.target.clone()) {
+                continue;
+            }
+            scanned += 1;
+            if !icon_cache_usable(std::path::Path::new(icon)) {
+                stale.push(r.target.clone());
             }
         }
-    };
-
-    let mut stale: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for r in &resources {
-        let Some(icon) = &r.icon else { continue };
-        // 只认自动提取键（icon == hash(target).png），手动导入/favicon 不动
-        if icon_cache_path(&r.target) != std::path::PathBuf::from(icon) {
-            continue;
+        if stale.is_empty() {
+            log::info!("图标清扫：{scanned} 个缓存全部健康，无需重提");
+            return IconSweepSummary { scanned, reextracted: 0, failed: 0 };
         }
-        if !seen.insert(r.target.clone()) {
-            continue;
-        }
-        let p = std::path::Path::new(icon);
-        if !icon_cache_usable(p) {
-            stale.push(r.target.clone());
-        }
-    }
-    if stale.is_empty() {
-        return;
-    }
-    log::info!("图标清扫：{} 个不健康缓存待重提", stale.len());
-    let mut ok = 0;
-    for target in &stale {
-        if extract_app_icon(target).is_some() {
-            ok += 1;
-        }
-    }
-    log::info!("图标清扫完成：{}/{} 重提成功（失败项保留旧图）", ok, stale.len());
+        log::info!("图标清扫：{} 个不健康缓存待重提", stale.len());
+        let failed = stale.iter().filter(|t| extract_app_icon(t).is_none()).count();
+        let reextracted = stale.len() - failed;
+        log::info!("图标清扫完成：{reextracted}/{} 重提成功（失败项保留旧图）", stale.len());
+        IconSweepSummary { scanned, reextracted, failed }
+    })
+    .await
+    .map_err(|e| format!("图标清扫失败: {e}"))
 }
 
 // ---------- 扫描桌面 ----------

@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCw,
   ScanSearch,
   Star,
   Trash2,
@@ -1033,6 +1034,39 @@ async function onFormSubmit(payload: {
   }
 }
 
+// ---- 修复图标缓存（手动清扫；2026-10-11 前为启动 15s 自动跑，按需求移到此处按钮触发）----
+const iconSweeping = ref(false)
+// 清扫重提后图标路径不变（键 = target 哈希），<img> 不会因 URL 相同重新拉取；
+// 递增版本参数强制刷新（asset 协议忽略 query，只按路径取文件）
+const iconSweepVersion = ref(0)
+
+async function sweepIcons() {
+  if (iconSweeping.value) return
+  iconSweeping.value = true
+  try {
+    const r = await tauriApi.sweepStaleIcons()
+    if (r.reextracted > 0) {
+      iconSweepVersion.value++
+      showToast(
+        r.failed > 0
+          ? `图标修复完成：重提 ${r.reextracted} 个，${r.failed} 个失败已保留旧图`
+          : `图标修复完成：重提 ${r.reextracted} 个不健康缓存`,
+      )
+    } else {
+      showToast(`图标缓存全部健康（检查 ${r.scanned} 项），无需修复`)
+    }
+  } catch (e) {
+    showToast(`图标修复失败：${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    iconSweeping.value = false
+  }
+}
+
+function sweptIconSrc(r: Resource): string {
+  const src = iconSrc(r.icon!)
+  return iconSweepVersion.value > 0 && src ? `${src}?sweep=${iconSweepVersion.value}` : src
+}
+
 // ---- 扫描导入（已安装应用 / 桌面 / 浏览器书签）----
 const scanVisible = ref(false)
 const scanMode = ref<ScanMode>('apps')
@@ -1208,6 +1242,17 @@ function cardAccentStyle(r: Resource) {
             @click="openScan('bookmarks')"
           >
             <Bookmark :size="15" :stroke-width="2.2" />
+          </button>
+          <button
+            v-if="isTauri()"
+            class="icon-btn scan"
+            :disabled="iconSweeping"
+            title="修复图标缓存：全量检查速达图标（手动导入的图标与网页 favicon 不动），重提模糊或损坏的缓存"
+            aria-label="修复图标缓存"
+            @click="sweepIcons"
+          >
+            <Loader2 v-if="iconSweeping" :size="15" :stroke-width="2.2" class="spin" />
+            <RefreshCw v-else :size="15" :stroke-width="2.2" />
           </button>
           <button
             class="icon-btn add"
@@ -1481,7 +1526,7 @@ function cardAccentStyle(r: Resource) {
                     <img
                       v-if="showImageIcon(r)"
                       class="suda-img"
-                      :src="iconSrc(r.icon!)"
+                      :src="sweptIconSrc(r)"
                       alt=""
                       draggable="false"
                       @error="onIconError(r)"
@@ -1642,6 +1687,12 @@ function cardAccentStyle(r: Resource) {
 .icon-btn.scan:hover {
   background: var(--brand-500);
   color: var(--text-on-accent);
+}
+/* 清扫进行中禁用（修复图标按钮）：压暗且不响应悬停 */
+.icon-btn.scan:disabled {
+  cursor: default;
+  opacity: 0.55;
+  transform: none;
 }
 
 /* tabs 行：nav + 「分区」入口同排 */
