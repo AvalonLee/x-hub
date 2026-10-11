@@ -2930,6 +2930,36 @@ pub fn note_image_url(name: &str) -> String {
     format!("http://xhub-note.localhost/{}", name)
 }
 
+/// 从 xhub-note 协议 URL 里取图片文件名（16 位哈希 + 白名单扩展，协议侧同款口径）。
+/// 尾随任何多余字符（query / 路径穿越 / 空串）一律判非法——这是借 URL 把数据根外
+/// 任意文件写进剪贴板的唯一入口，必须从严。
+fn note_image_name_from_url(url: &str) -> Option<String> {
+    const NEEDLE: &str = "xhub-note.localhost/";
+    let tail = url.split_once(NEEDLE)?.1;
+    let name: String = tail
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
+        .collect();
+    (name.len() == tail.len() && is_note_image_name(&name)).then_some(name)
+}
+
+/// 复制笔记内嵌图片到系统剪贴板（灯箱「复制图片」按钮 / 整图选中 Ctrl+C）。
+/// 入参为笔记里的 xhub-note 协议 URL，文件名按协议同款口径校验后才拼数据根路径。
+/// 写入后清掉回声指纹：从笔记复制图片与从浏览器复制一样应正常进剪贴板历史
+/// （历史项自身回写才需要抑制回声，这里不是）。
+#[tauri::command]
+pub fn copy_note_image(url: String) -> Result<(), String> {
+    let name =
+        note_image_name_from_url(&url).ok_or_else(|| "不是有效的笔记图片地址".to_string())?;
+    let path = crate::paths::data_root()
+        .join("notes")
+        .join("images")
+        .join(&name);
+    crate::clipboard::set_clipboard_image(&path.to_string_lossy())?;
+    crate::clipboard::clear_self_set_fingerprint();
+    Ok(())
+}
+
 // ---------- 扫描已安装应用 ----------
 
 #[derive(serde::Serialize)]
@@ -4465,6 +4495,32 @@ fn parse_kind(kind: &str) -> Result<ResourceKind, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// copy_note_image 的 URL 入口校验：合法 xhub-note URL 放行，
+    /// 外站地址 / 尾随 query / 哈希长度不符 / 越权扩展 / 路径穿越一律拒绝
+    #[test]
+    fn note_image_name_from_url_validates_like_protocol() {
+        assert_eq!(
+            note_image_name_from_url("http://xhub-note.localhost/0123456789abcdef.png").as_deref(),
+            Some("0123456789abcdef.png")
+        );
+        assert!(note_image_name_from_url("http://xhub-note.localhost/0123456789abcdef.webp").is_some());
+        assert!(note_image_name_from_url("http://example.com/0123456789abcdef.png").is_none());
+        assert!(
+            note_image_name_from_url("http://xhub-note.localhost/0123456789abcdef.png?x=1")
+                .is_none(),
+            "尾随 query 必须整体判非法"
+        );
+        assert!(note_image_name_from_url("http://xhub-note.localhost/abc.png").is_none());
+        assert!(
+            note_image_name_from_url("http://xhub-note.localhost/0123456789abcdef.exe").is_none(),
+            "白名单外的扩展名不得放行"
+        );
+        assert!(
+            note_image_name_from_url("http://xhub-note.localhost/../../app.json").is_none(),
+            "路径穿越不得放行"
+        );
+    }
 
     /// 平台模型的 Key 是占位符（真凭据是账号登录态、请求时现取），**任何界面都不该拿到它**：
     /// 展示出来只会有两种坏结果 —— 让人以为平台 Key 泄露了，或让人以为这里必须填 Key。

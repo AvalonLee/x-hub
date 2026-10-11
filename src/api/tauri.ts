@@ -1260,6 +1260,8 @@ export const tauriApi = {
   /** 保存笔记图片（base64，不含 data: 前缀）：落盘 notes/images，返回 xhub-note 协议 URL */
   importNoteImage: (dataB64: string, ext: string) =>
     invoke<string>('import_note_image', { dataB64, ext }),
+  /** 复制笔记内嵌图片到系统剪贴板（xhub-note URL，后端按协议同款口径校验文件名） */
+  copyNoteImage: (url: string) => invoke<void>('copy_note_image', { url }),
   inspectPath: (path: string) =>
     invoke<{ name: string; is_dir: boolean }>('inspect_path', { path }),
   listTags: () => invoke<Tag[]>('list_tags'),

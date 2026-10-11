@@ -3,20 +3,21 @@ import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Crepe } from '@milkdown/crepe'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
-import { editorViewCtx, parserCtx } from '@milkdown/kit/core'
+import { editorViewCtx, parserCtx, serializerCtx } from '@milkdown/kit/core'
 import type { Ctx } from '@milkdown/kit/ctx'
 import { imageBlockSchema } from '@milkdown/kit/component/image-block'
 import { codeBlockSchema } from '@milkdown/kit/preset/commonmark'
 import { createTable } from '@milkdown/kit/preset/gfm'
-import { Fragment, type Node as ProseNode, type Schema } from '@milkdown/kit/prose/model'
+import { Fragment, Slice, type Node as ProseNode, type Schema } from '@milkdown/kit/prose/model'
 import type { EditorView } from '@milkdown/kit/prose/view'
 import { NodeSelection, TextSelection, type EditorState } from '@milkdown/kit/prose/state'
-import { Code2, Columns2, Link2, PencilLine, Plus, Smile, Sparkles, Tag as TagIcon, WandSparkles, Waypoints, X } from 'lucide-vue-next'
+import { Code2, Columns2, Copy, Eye, Link2, PencilLine, Plus, Smile, Sparkles, Tag as TagIcon, WandSparkles, Waypoints, X } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Note, type NoteLinks, type Tag } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { normalizeShortcutDisplay } from '../composables/useShortcutRecorder'
 import { attachBlockDrag } from '../utils/blockDrag'
 import { beautifyNoteMarkdown } from '../utils/markdownBeautify'
+import { fragmentToPlainText } from '../utils/clipboardPlainText'
 import { restoreNoteImageSyntax } from '../utils/noteImageSyntax'
 import { expandOnEnter, matchWysiwygLine, type LineShortcut } from '../utils/markdownEnter'
 import { loosenHtmlBreaks, renderNoteMarkdown, restoreCrepeMarkdown } from '../utils/markdownHtml'
@@ -26,9 +27,11 @@ import { getQuickEmojis } from '../utils/emoji'
 import { saveNoteImageFile } from '../utils/noteImage'
 import { parseTimestamp } from '../utils/time'
 import EmojiPicker from './EmojiPicker.vue'
+import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 
 /**
- * 速记编辑器：实时预览（Crepe 所见即所得）/ 分屏预览 / 源码。Markdown 为真相源，600ms 防抖落盘。
+ * 速记编辑器：实时预览 / 仅预览（两者共用同一 Crepe 实例，仅预览 = 只读态）/ 分屏（源码 +
+ * 只读 Crepe 预览，同一渲染器）/ 源码。Markdown 为真相源，600ms 防抖落盘。
  * 模式记在配置 note_editor_mode，按用户记住，不按笔记。
  * 行尾回车补结构（三种模式同一套判断）：``` / $$ 闭合，未写完的图片补成 ![]()，
  * |列x行| 或表头行生成表格。实时预览里回车同样把 #、>、-、1.、---、- [ ]、- [x] 收成标题、引用、列表、分隔线和任务。
@@ -66,10 +69,14 @@ const notesShortcutHint = computed(() =>
 
 const mode = ref<NoteEditorMode>(normalizeNoteEditorMode(store.state.config.note_editor_mode))
 
+/** 实时预览与仅预览共用同一个 Crepe 实例（同一渲染器 = 排版像素级一致），其余模式销毁编辑器 */
+function isLiveMode(m: NoteEditorMode): boolean {
+  return m === 'wysiwyg' || m === 'preview'
+}
+
 const rootEl = ref<HTMLDivElement>()
 const splitSourceEl = ref<HTMLTextAreaElement | null>(null)
 const sourceEl = ref<HTMLTextAreaElement | null>(null)
-const previewEl = ref<HTMLDivElement | null>(null)
 let splitResize: ResizeObserver | null = null
 
 let crepe: Crepe | null = null
@@ -79,6 +86,18 @@ let mounting = false
 /** 挂载期间又切换了笔记：完成后需按最新笔记重挂一次（否则编辑器停留旧内容、防抖保存会跨笔记污染） */
 let remountQueued = false
 let detachBlockDrag: (() => void) | null = null
+// ---- 分屏预览的第二个（只读）Crepe 实例：与编辑态同一渲染器，格式像素级一致 ----
+// ⚠️ 这些声明必须留在下方 immediate watch 之前（TDZ，同 detachWikiListeners 的教训）
+let previewCrepe: Crepe | null = null
+let previewMountedOn: HTMLElement | null = null
+let previewMounting = false
+let previewRemountQueued = false
+let previewQueued: string | null = null
+/** 右侧预览当前已应用的 Markdown（同步前比对，内容没变不重建文档） */
+let previewApplied = ''
+let detachPreviewListeners: () => void = () => {}
+let splitPreviewTimer: ReturnType<typeof setTimeout> | null = null
+const previewRootEl = ref<HTMLDivElement | null>(null)
 /** 图片监听解绑函数（attachImageListeners 内赋值）。声明必须留在下方 immediate watch 之前：
  * 源码/分屏模式下首挂载的 immediate 回调会经 destroyEditor 调到它，后置声明触发 TDZ（约定 38 时序陷阱②） */
 let detachImageListeners: () => void = () => {}
@@ -104,7 +123,6 @@ interface WikiSuggest {
 const localTitle = ref('')
 const localContent = ref('')
 const dirty = ref(false)
-const previewHtml = computed(() => renderNoteMarkdown(localContent.value))
 
 // ---- 生命周期 ----
 onBeforeUnmount(() => {
@@ -119,7 +137,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onAiKeydown)
   splitResize?.disconnect()
   splitResize = null
+  if (splitPreviewTimer) {
+    clearTimeout(splitPreviewTimer)
+    splitPreviewTimer = null
+  }
   void destroyEditor()
+  void destroyPreviewEditor()
 })
 
 async function destroyEditor() {
@@ -144,24 +167,14 @@ async function destroyEditor() {
   if (rootEl.value) rootEl.value.innerHTML = ''
 }
 
-async function mountEditor(content: string) {
-  if (!rootEl.value) return
-  if (mounting) {
-    // Crepe 异步初始化期间再次切换笔记时不能静默吞掉挂载请求——记下重挂，本次完成后按最新笔记重来
-    queuedMarkdown = content
-    remountQueued = true
-    return
-  }
-  mounting = true
-  const wantId = props.note?.id ?? null
-  try {
-    await destroyEditor()
-    const c = new Crepe({
-      root: rootEl.value,
-      defaultValue: loosenHtmlBreaks(content),
-      // AI 特性需外部模型服务，保持纯本地
-      features: { [Crepe.Feature.AI]: false },
-      featureConfigs: {
+/** 公共 Crepe 配置：主编辑区与分屏预览共用同一份，保证两个实例渲染完全一致 */
+function buildCrepe(root: HTMLElement, content: string): Crepe {
+  return new Crepe({
+    root,
+    defaultValue: loosenHtmlBreaks(content),
+    // AI 特性需外部模型服务，保持纯本地
+    features: { [Crepe.Feature.AI]: false },
+    featureConfigs: {
         [Crepe.Feature.ImageBlock]: {
           onUpload: saveNoteImageFile,
           inlineOnUpload: saveNoteImageFile,
@@ -242,7 +255,22 @@ async function mountEditor(content: string) {
           latexLabel: '公式',
         },
       },
-    })
+  })
+}
+
+async function mountEditor(content: string) {
+  if (!rootEl.value) return
+  if (mounting) {
+    // Crepe 异步初始化期间再次切换笔记时不能静默吞掉挂载请求——记下重挂，本次完成后按最新笔记重来
+    queuedMarkdown = content
+    remountQueued = true
+    return
+  }
+  mounting = true
+  const wantId = props.note?.id ?? null
+  try {
+    await destroyEditor()
+    const c = buildCrepe(rootEl.value, content)
     await c.create()
     if (!rootEl.value || (props.note?.id ?? null) !== wantId) {
       // create 期间笔记已切换/组件已卸载：本次实例作废，队列重挂最新笔记（不挂监听、不接管拖拽）
@@ -268,6 +296,16 @@ async function mountEditor(content: string) {
     // 块拖拽（六点把手）指针实现：create 完成后从 ctx 取 EditorView 接管把手拖拽
     c.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx)
+      // 复制/剪切产「所见即所得」纯文本：Crepe 内置的 milkdown clipboard 插件会把
+      // clipboardTextSerializer 覆盖成「选区序列化成 Markdown」，粘出去全是 \* \[ 转义
+      // 与 <邮箱>、[文字](链接) 源码。直接 view.setProps 挂 directEditorProps——
+      // ProseMirror 的 someProp 先查 directEditorProps 再查插件 props，必胜插件那份；
+      // text/html 仍走默认 DOM 序列化，粘到 Word 等富文本目标时加粗/链接样式保留
+      view.setProps({
+        // 仅预览与实时预览共用实例：只读态在此一并挂上（切换时 applyEditable 再显式刷新）
+        editable: () => mode.value === 'wysiwyg',
+        clipboardTextSerializer: (slice) => fragmentToPlainText(slice.content),
+      })
       detachBlockDrag = attachBlockDrag(() => view)
     })
     // 已缓存的图片不会再次触发 load：挂载完成后先按 attrs 同步一次宽度
@@ -276,7 +314,7 @@ async function mountEditor(content: string) {
     console.error('Crepe 初始化失败', e)
   } finally {
     mounting = false
-    if (remountQueued && props.note && rootEl.value && mode.value === 'wysiwyg') {
+    if (remountQueued && props.note && rootEl.value && isLiveMode(mode.value)) {
       remountQueued = false
       const next = queuedMarkdown ?? content
       queuedMarkdown = null
@@ -286,6 +324,118 @@ async function mountEditor(content: string) {
       queuedMarkdown = null
     }
   }
+}
+
+// ---- 分屏预览：右侧挂一个只读 Crepe（同一渲染器 = 与编辑/仅预览格式一致），源码侧防抖同步 ----
+
+async function destroyPreviewEditor() {
+  detachPreviewListeners()
+  const c = previewCrepe
+  previewCrepe = null
+  previewMountedOn = null
+  previewApplied = ''
+  if (c) {
+    try {
+      await c.destroy()
+    } catch (e) {
+      console.warn('分屏预览 Crepe 销毁异常', e)
+    }
+  }
+  if (previewRootEl.value) previewRootEl.value.innerHTML = ''
+}
+
+async function mountSplitPreview(content: string) {
+  const root = previewRootEl.value
+  if (!root) return
+  if (previewMounting) {
+    // 异步初始化期间内容又变了：记下重挂，本次完成后按最新内容重来（同 mountEditor 的队列语义）
+    previewQueued = content
+    previewRemountQueued = true
+    return
+  }
+  previewMounting = true
+  const wantId = props.note?.id ?? null
+  try {
+    await destroyPreviewEditor()
+    const c = buildCrepe(root, content)
+    await c.create()
+    if (!previewRootEl.value || (props.note?.id ?? null) !== wantId || mode.value !== 'split') {
+      // create 期间笔记已切换/已离开分屏：本次实例作废，队列重挂（不挂监听）
+      previewRemountQueued = true
+      try {
+        await c.destroy()
+      } catch {
+        /* 丢弃的实例，销毁异常无需处理 */
+      }
+      return
+    }
+    previewCrepe = c
+    previewMountedOn = root
+    previewApplied = loosenHtmlBreaks(content)
+    c.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx)
+      view.setProps({
+        // 只读预览；复制序列化与主编辑区同款所见即所得口径
+        editable: () => false,
+        clipboardTextSerializer: (slice) => fragmentToPlainText(slice.content),
+      })
+    })
+    // 链接点击（外链/笔记双链）与图片灯箱与主编辑区同一套委托；[[跳转分支自带 mode 守卫
+    root.addEventListener('click', onEditorClick)
+    // 图片右键「复制图片」同款口径
+    root.addEventListener('contextmenu', onEditorContextMenu)
+    // 已缓存图片不触发 load：挂载完按 attrs 同步一次宽度
+    root.addEventListener('load', onPreviewImgLoad, true)
+    detachPreviewListeners = () => {
+      root.removeEventListener('click', onEditorClick)
+      root.removeEventListener('contextmenu', onEditorContextMenu)
+      root.removeEventListener('load', onPreviewImgLoad, true)
+      detachPreviewListeners = () => {}
+    }
+    syncImageWidthsFor(c)
+  } catch (e) {
+    console.error('分屏预览 Crepe 初始化失败', e)
+  } finally {
+    previewMounting = false
+    if (previewRemountQueued && props.note && previewRootEl.value && mode.value === 'split') {
+      previewRemountQueued = false
+      const next = previewQueued ?? content
+      previewQueued = null
+      void mountSplitPreview(next)
+    } else {
+      previewRemountQueued = false
+      previewQueued = null
+    }
+  }
+}
+
+/** 源码侧编辑 → 300ms 防抖后单事务整篇替换右侧预览文档（内容没变不动）；按滚动比例恢复位置 */
+function replacePreviewDoc(markdown: string) {
+  const c = previewCrepe
+  if (!c || markdown === previewApplied) return
+  const scroller = previewScroller()
+  const ratio =
+    scroller && scroller.scrollHeight > scroller.clientHeight
+      ? scroller.scrollTop / (scroller.scrollHeight - scroller.clientHeight)
+      : null
+  if (!replaceWholeDocFor(c, markdown)) return
+  previewApplied = markdown
+  if (scroller && ratio != null) {
+    const max = scroller.scrollHeight - scroller.clientHeight
+    scroller.scrollTop = max > 0 ? ratio * max : 0
+  }
+  syncImageWidthsFor(c)
+}
+
+/** 分屏预览的滚动容器：Crepe 挂载后是 root 内的 .milkdown（挂载前返回 null） */
+function previewScroller(): HTMLElement | null {
+  return previewRootEl.value?.querySelector('.milkdown') ?? null
+}
+
+function onPreviewImgLoad(e: Event) {
+  const t = e.target
+  if (!(t instanceof HTMLImageElement) || t.dataset.type !== 'image-block') return
+  syncImageWidthsFor(previewCrepe)
 }
 
 // ---- 笔记切换 / 防抖保存 ----
@@ -327,7 +477,7 @@ watch(
     }
     const noteChanged = prevId !== id
     if (noteChanged) syncLocal()
-    if (mode.value === 'wysiwyg') {
+    if (isLiveMode(mode.value)) {
       // 源码/分屏没有这块容器。el 为空就等下一次 rootEl 赋值，不能当成「笔记没了」去清正文。
       if (el && (noteChanged || !crepe || mountedOn !== el)) void mountEditor(localContent.value)
     } else if (noteChanged) {
@@ -345,6 +495,35 @@ watch(
   },
   { immediate: true, flush: 'post' },
 )
+
+// 分屏预览实例的挂载节奏与主编辑区同构：观察容器出现 + 笔记切换（声明在主 watch 之后，
+// 同一轮 flush 里 syncLocal 先执行，这里拿到的已是新笔记正文）
+watch(
+  [() => props.note?.id, previewRootEl],
+  async ([id, el], prev) => {
+    const prevId = prev?.[0]
+    if (!props.note || !el || mode.value !== 'split') {
+      await destroyPreviewEditor()
+      return
+    }
+    const noteChanged = prevId !== id
+    if (noteChanged || !previewCrepe || previewMountedOn !== el) {
+      void mountSplitPreview(localContent.value)
+    }
+  },
+  { immediate: true, flush: 'post' },
+)
+
+// 分屏模式下源码侧任何来源的内容变化（打字/美化/AI 应用）→ 300ms 防抖后刷新右侧预览
+watch(localContent, () => {
+  if (mode.value !== 'split' || !previewCrepe) return
+  if (splitPreviewTimer) clearTimeout(splitPreviewTimer)
+  splitPreviewTimer = setTimeout(() => {
+    splitPreviewTimer = null
+    if (mode.value !== 'split' || !previewCrepe) return
+    replacePreviewDoc(loosenHtmlBreaks(localContent.value))
+  }, 300)
+})
 
 watch(
   () => store.state.config.note_editor_mode,
@@ -500,26 +679,27 @@ function onSourceInput(e: Event) {
   if (mode.value === 'split') void nextTick(syncPreviewScroll)
 }
 
-/** 分屏时右边预览按左边源码的滚动比例跟着走。两边高度不同，对齐的是滚动条位置而不是某一行。 */
+/** 分屏时右边预览按左边源码的滚动比例跟着走。两边高度不同，对齐的是滚动条位置而不是某一行。
+ *  右侧现在是只读 Crepe，滚动容器是它内部的 .milkdown（挂载完成后才存在）。 */
 function syncPreviewScroll() {
   const source = splitSourceEl.value
-  const preview = previewEl.value
+  const preview = previewScroller()
   if (!source || !preview) return
   const sourceMax = source.scrollHeight - source.clientHeight
   const previewMax = preview.scrollHeight - preview.clientHeight
   preview.scrollTop = sourceMax <= 0 || previewMax <= 0 ? 0 : (source.scrollTop / sourceMax) * previewMax
 }
 
-watch([splitSourceEl, previewEl], () => {
+watch([splitSourceEl, previewRootEl], () => {
   splitResize?.disconnect()
   splitResize = null
   const source = splitSourceEl.value
-  const preview = previewEl.value
+  const preview = previewRootEl.value
   if (!source || !preview) return
   splitResize = new ResizeObserver(() => syncPreviewScroll())
   splitResize.observe(source)
   splitResize.observe(preview)
-  // 双跳延迟：v-html 刚写入时图片/代码块高度未稳定，立即同步会拿到不准的
+  // 双跳延迟：Crepe 刚挂载时图片/代码块高度未稳定，立即同步会拿到不准的
   // scrollHeight（表现为首次进分屏两边行不对应，切一次源码再回来才正常）
   requestAnimationFrame(() => requestAnimationFrame(syncPreviewScroll))
 })
@@ -544,7 +724,8 @@ function onSourceKeydown(e: KeyboardEvent) {
  * 捕获阶段接住回车，把整行快捷标记换成代码块、公式块、图片块、表格、标题、引用、列表或分隔线。
  */
 function onCrepeKeydown(e: KeyboardEvent) {
-  if (e.isComposing || !crepe) return
+  // 仅预览只读：回车快捷结构、智能括号等输入类接管全部短路
+  if (e.isComposing || !crepe || mode.value !== 'wysiwyg') return
   const target = e.target
   if (target instanceof HTMLElement && target.closest('input, textarea, .milkdown-slash-menu')) return
   // 智能括号：「[」自动补「]」、「]」跳过已补的右括号。程序化 dispatch 不触发原生
@@ -848,14 +1029,28 @@ function cursorInShortcut(doc: ProseNode, start: number, size: number, type: Lin
 
 async function applyMode(next: NoteEditorMode, persist: boolean) {
   if (next === mode.value) return
-  if (mode.value === 'wysiwyg') {
+  const prev = mode.value
+  if (prev === 'wysiwyg') {
     const captured = captureCrepeMarkdown()
     if (captured != null) adoptMarkdown(restoreCrepeMarkdown(captured))
   }
   mode.value = next
   if (persist) void store.setNoteEditorMode(next)
-  if (next !== 'wysiwyg') await destroyEditor()
-  // 切回实时预览时容器会重新出现，上面的 rootEl watch 负责挂载
+  // 实时预览 ⇄ 仅预览共用同一个 Crepe 实例：只切只读态，不销毁重建（切换瞬时、滚动位置保留）
+  if (isLiveMode(prev) && isLiveMode(next)) {
+    applyEditable()
+    return
+  }
+  if (isLiveMode(prev)) await destroyEditor()
+  // 切回实时预览/仅预览时容器会重新出现，上面的 rootEl watch 负责挂载
+}
+
+/** 实时预览 ⇄ 仅预览切换只读态。必须显式 setProps：PM 只在 props 变化/state 更新时
+ *  重算 contenteditable，光改 mode.value 闭包返回值不会刷新 DOM */
+function applyEditable() {
+  crepe?.editor.action((ctx) => {
+    ctx.get(editorViewCtx).setProps({ editable: () => mode.value === 'wysiwyg' })
+  })
 }
 
 // ---- 一键美化格式（utils/markdownBeautify.ts，确定性排版整理） ----
@@ -904,10 +1099,8 @@ function onBeautify() {
   })
 }
 
-/** 所见即所得模式：把一份 Markdown 解析回文档并整篇替换。单个事务 = Ctrl+Z 一步整体还原。 */
-function replaceWholeDocWithMarkdown(markdown: string): boolean {
-  const c = crepe
-  if (!c) return false
+/** 把一份 Markdown 解析回文档并整篇替换（单事务 = 一步撤销）。主编辑区与分屏预览共用。 */
+function replaceWholeDocFor(c: Crepe, markdown: string): boolean {
   try {
     let replaced = false
     c.editor.action((ctx) => {
@@ -921,9 +1114,16 @@ function replaceWholeDocWithMarkdown(markdown: string): boolean {
     })
     return replaced
   } catch (e) {
-    console.warn('一键美化：整篇替换失败', e)
+    console.warn('整篇替换失败', e)
     return false
   }
+}
+
+/** 所见即所得模式：把一份 Markdown 解析回文档并整篇替换。单个事务 = Ctrl+Z 一步整体还原。 */
+function replaceWholeDocWithMarkdown(markdown: string): boolean {
+  const c = crepe
+  if (!c) return false
+  return replaceWholeDocFor(c, markdown)
 }
 
 // ---- AI 深度整理（ai_transform_note：无会话、不落库的语义重排，弹层预览后应用） ----
@@ -960,9 +1160,73 @@ function unwrapModelMarkdown(text: string): string {
   return (m ? m[1] : t).trim()
 }
 
+// ---- 选中片段整理：有选区就只整理选中部分，应用时替换回原位；无选区整理全文 ----
+
+/** 本次整理范围：full = 全文；selection = 选中片段（doc = wysiwyg 文档区间，text = 源码字符区间） */
+type AiScope = 'full' | 'selection'
+const aiScope = ref<AiScope>('full')
+const aiDocRange = ref<{ from: number; to: number; inline: boolean } | null>(null)
+const aiTextRange = ref<{ start: number; end: number } | null>(null)
+
+interface AiSelectionCapture {
+  markdown: string
+  doc?: { from: number; to: number; inline: boolean }
+  text?: { start: number; end: number }
+}
+
+/**
+ * 捕获当前选中文字（点击整理按钮时编辑器已失焦，但 ProseMirror 的 state.selection
+ * 与 textarea 的 selectionStart/End 都会保留最后选区）。无选区/选区纯空白返回 null = 整理全文。
+ * wysiwyg 侧把选区切片序列化成 Markdown（行内片段先包一层段落，doc 节点装不下裸行内内容），
+ * 再走 restoreCrepeMarkdown 收掉 Crepe 的序列化转义痕迹。
+ */
+function captureAiSelection(): AiSelectionCapture | null {
+  if (mode.value === 'wysiwyg' && crepe) {
+    let captured: AiSelectionCapture | null = null
+    crepe.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx)
+      const { state } = view
+      if (state.selection.empty) return
+      const slice = state.selection.content()
+      let frag = slice.content
+      if (frag.firstChild && !frag.firstChild.isBlock) {
+        const para = state.schema.nodes.paragraph
+        if (!para) return
+        frag = Fragment.from(para.create(null, frag))
+      }
+      const docNode = state.schema.topNodeType.createAndFill(undefined, frag)
+      if (!docNode) return
+      const md = restoreCrepeMarkdown(ctx.get(serializerCtx)(docNode))
+      if (!md.trim()) return
+      const { $from, $to } = state.selection
+      captured = {
+        markdown: md,
+        doc: {
+          from: state.selection.from,
+          to: state.selection.to,
+          inline: $from.sameParent($to) && $from.parent.isTextblock,
+        },
+      }
+    })
+    return captured
+  }
+  if (mode.value === 'source' || mode.value === 'split') {
+    const el = mode.value === 'split' ? splitSourceEl.value : sourceEl.value
+    if (!el || el.selectionStart === el.selectionEnd) return null
+    const md = localContent.value.slice(el.selectionStart, el.selectionEnd)
+    if (!md.trim()) return null
+    return { markdown: md, text: { start: el.selectionStart, end: el.selectionEnd } }
+  }
+  return null
+}
+
 async function openAiTransform() {
   if (!props.note || !canBeautify.value || aiState.value === 'streaming') return
-  const current = collectContentForSave()
+  const sel = captureAiSelection()
+  aiScope.value = sel ? 'selection' : 'full'
+  aiDocRange.value = sel?.doc ?? null
+  aiTextRange.value = sel?.text ?? null
+  const current = sel ? sel.markdown : collectContentForSave()
   const seq = ++aiRequestSeq
   aiSource.value = current
   aiResult.value = ''
@@ -991,21 +1255,77 @@ function closeAiDialog() {
   // 序号自增即作废在途请求的增量与返回值
   aiRequestSeq++
   aiState.value = 'idle'
+  aiScope.value = 'full'
+  aiDocRange.value = null
+  aiTextRange.value = null
   // 原稿可能很长（上限 3000 条笔记里最长的那篇），关闭后没有留存价值——下次发起会重取
   aiSource.value = ''
+}
+
+/** 所见即所得模式：把整理结果解析回节点并替换选中区间（单个事务 = Ctrl+Z 一步还原）。
+ *  段内行内选区且结果恰为单段时只换行内内容，不打散光标所在段落；其余情况整块替换选区。
+ *  替换后文档变化会经 markdownUpdated 走正常保存链路，内容与原文相同（无操作）时无需保存。 */
+function replaceSelectionWithMarkdown(
+  markdown: string,
+  range: { from: number; to: number; inline: boolean },
+): boolean {
+  const c = crepe
+  if (!c) return false
+  try {
+    let replaced = false
+    c.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx)
+      const parsed = ctx.get(parserCtx)(markdown)
+      if (!parsed) return
+      const { state } = view
+      const size = state.doc.content.size
+      const from = Math.max(0, Math.min(range.from, size))
+      const to = Math.max(from, Math.min(range.to, size))
+      const singlePara =
+        parsed.childCount === 1 && parsed.firstChild?.type.name === 'paragraph'
+      const slice =
+        range.inline && singlePara && parsed.firstChild
+          ? new Slice(parsed.firstChild.content, 0, 0)
+          : new Slice(parsed.content, 0, 0)
+      view.dispatch(state.tr.replace(from, to, slice).scrollIntoView())
+      replaced = true
+    })
+    return replaced
+  } catch (e) {
+    console.warn('AI 整理：替换选中片段失败', e)
+    return false
+  }
 }
 
 function applyAiResult() {
   const md = aiMarkdown.value
   if (!md) return
   const restored = aiImagesRestored.value
+  const selection = aiScope.value === 'selection'
   if (mode.value === 'wysiwyg') {
-    // 整篇单事务替换（一步撤销）；失败不落任何改动
-    if (!replaceWholeDocWithMarkdown(md)) {
-      showToast?.('应用失败，请重试')
-      return
+    const range = aiDocRange.value
+    if (selection && range) {
+      // 只替换选中片段（一步撤销）；失败不落任何改动
+      if (!replaceSelectionWithMarkdown(md, range)) {
+        showToast?.('应用失败，请重试')
+        return
+      }
+    } else {
+      // 整篇单事务替换（一步撤销）；失败不落任何改动
+      if (!replaceWholeDocWithMarkdown(md)) {
+        showToast?.('应用失败，请重试')
+        return
+      }
+      adoptMarkdown(md)
     }
-    adoptMarkdown(md)
+  } else if (selection && aiTextRange.value) {
+    // 源码/分屏：按字符区间把整理结果换回去，光标选中替换进来的片段
+    const { start, end } = aiTextRange.value
+    adoptMarkdown(localContent.value.slice(0, start) + md + localContent.value.slice(end))
+    void nextTick(() => {
+      const el = mode.value === 'split' ? splitSourceEl.value : sourceEl.value
+      el?.setSelectionRange(start, start + md.length)
+    })
   } else {
     // 内容已重组，行号映射无意义，光标回文档开头
     adoptMarkdown(md)
@@ -1026,23 +1346,6 @@ watch(aiState, (s) => {
   else window.removeEventListener('keydown', onAiKeydown)
 })
 
-function onPreviewClick(e: MouseEvent) {
-  const target = e.target
-  if (!(target instanceof Element)) return
-  // 预览区链接：默认浏览器打开（编辑区同款口径）
-  const anchor = target.closest<HTMLAnchorElement>('a[href]')
-  if (anchor) {
-    e.preventDefault()
-    const href = anchor.getAttribute('href') ?? ''
-    const noteId = noteIdFromHref(href)
-    if (noteId != null) emit('open-note', noteId)
-    else if (/^https?:\/\//i.test(href)) void tauriApi.openExternal(href)
-    return
-  }
-  if (!(target instanceof HTMLImageElement) || !target.src) return
-  previewSrc.value = target.currentSrc || target.src
-}
-
 /** 标题输入（v-model 之外）：用户修改标题必须同样进入防抖保存链路，
  *  否则只在改正文时才落库——改完标题不改正文，标题永远不会保存（切换/重启即丢失） */
 function onTitleInput() {
@@ -1058,7 +1361,7 @@ function onTitleInput() {
 
 const IMAGE_BLOCK_HANDLE_PX = 26 // 右下角把手命中区边长（与 CSS 视觉一致）
 
-/** 监听图片 load（不冒泡，用捕获）与点击/拖拽把手，随编辑器挂载/销毁配对 */
+/** 监听图片 load（不冒泡，用捕获）与点击/拖拽把手/右键，随编辑器挂载/销毁配对 */
 function attachImageListeners() {
   const root = rootEl.value
   if (!root) return
@@ -1066,11 +1369,15 @@ function attachImageListeners() {
   root.addEventListener('click', onEditorClick)
   root.addEventListener('pointerdown', onEditorPointerDown, true)
   root.addEventListener('keydown', onCrepeKeydown, true)
+  root.addEventListener('copy', onEditorCopy)
+  root.addEventListener('contextmenu', onEditorContextMenu)
   detachImageListeners = () => {
     root.removeEventListener('load', onEditorImgLoad, true)
     root.removeEventListener('click', onEditorClick)
     root.removeEventListener('pointerdown', onEditorPointerDown, true)
     root.removeEventListener('keydown', onCrepeKeydown, true)
+    root.removeEventListener('copy', onEditorCopy)
+    root.removeEventListener('contextmenu', onEditorContextMenu)
     detachImageListeners = () => {}
   }
 }
@@ -1079,9 +1386,9 @@ function onEditorImgLoad(e: Event) {
   const t = e.target
   if (!(t instanceof HTMLImageElement) || t.dataset.type !== 'image-block') return
   syncImageWidths()
-}/** 把 doc 里每个 image-block 的 attrs.ratio 应用到对应 DOM 图片（幂等，无强制布局） */
-function syncImageWidths() {
-  const c = crepe
+}/** 把 doc 里每个 image-block 的 attrs.ratio 应用到对应 DOM 图片（幂等，无强制布局）。
+ *  主编辑区与分屏预览各自调用（传各自实例） */
+function syncImageWidthsFor(c: Crepe | null) {
   if (!c) return
   c.editor.action((ctx) => {
     const view = ctx.get(editorViewCtx)
@@ -1094,6 +1401,11 @@ function syncImageWidths() {
       applyImageWidth(block, img, Number(node.attrs.ratio) || 1)
     })
   })
+}
+
+/** 主编辑区（实时预览/仅预览）实例的宽度同步快捷方式 */
+function syncImageWidths() {
+  syncImageWidthsFor(crepe)
 }
 
 /**
@@ -1148,7 +1460,8 @@ function isHandleZone(wrapper: Element, e: { clientX: number; clientY: number })
 }
 
 function onEditorPointerDown(e: PointerEvent) {
-  if (e.button !== 0 || !crepe) return
+  // 仅预览不提供图片宽度调整（把手视觉也已隐藏）
+  if (e.button !== 0 || !crepe || mode.value !== 'wysiwyg') return
   const target = e.target
   if (!(target instanceof Element)) return
   const wrapper = target.closest<HTMLElement>('.milkdown-image-block .image-wrapper')
@@ -1216,6 +1529,11 @@ const previewSrc = ref('')
 
 function onEditorClick(e: MouseEvent) {
   if (previewSrc.value) return
+  // 预览类区域已放开文字选择：拖选结束的那次 click（落点可能正落在链接/图片上）不开链接/灯箱；
+  // 普通单击不受影响——mousedown 会先折叠既有选区，click 时选区必为空。
+  // ⚠️ 必须按去空白后的文本判断：编辑态点击图片会产生整图 NodeSelection，其 DOM 选区的
+  // toString 是块边界换行 "\n\n"（图片无文本），裸判非空字符串会把灯箱永远拦下（实测踩过）
+  if (window.getSelection()?.toString().trim()) return
   const target = e.target
   if (!(target instanceof Element)) return
   // 链接点击跳系统浏览器（编辑态 a 标签默认无反应，这里委托打开；只放行 http(s)）
@@ -1268,6 +1586,85 @@ function onEditorClick(e: MouseEvent) {
 
 function onPreviewKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') previewSrc.value = ''
+}
+
+/** 复制笔记图片到系统剪贴板（灯箱按钮与整图选中 Ctrl+C 共用）：
+ *  Tauri 下走后端命令把位图写进系统剪贴板，粘到聊天 / 文档 / 画图里都有图；
+ *  浏览器预览无后端，data URL 取 blob 走异步剪贴板 API 兜底 */
+async function copyImageFromUrl(src: string) {
+  if (isTauri()) {
+    try {
+      await tauriApi.copyNoteImage(src)
+      showToast?.('图片已复制')
+    } catch (e) {
+      showToast?.(`复制失败：${String(e)}`)
+    }
+    return
+  }
+  try {
+    const blob = await (await fetch(src)).blob()
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
+    showToast?.('图片已复制')
+  } catch {
+    showToast?.('复制失败')
+  }
+}
+
+/** 整图节点选中（image-block / image-inline 的 NodeSelection）时 Ctrl+C：默认序列化
+ *  只会把 xhub-note URL 塞进 text/html，粘到别处没有图——改写成系统剪贴板位图。
+ *  混合选区（图 + 文）不拦截，仍走文本 + HTML 序列化；粘回编辑器经上传管线
+ *  按内容哈希落同一文件，天然无损 */
+function onEditorCopy(e: ClipboardEvent) {
+  const c = crepe
+  if (!c) return
+  let imageSrc = ''
+  c.editor.action((ctx) => {
+    const sel = ctx.get(editorViewCtx).state.selection
+    if (!(sel instanceof NodeSelection)) return
+    if (sel.node.type.name !== 'image-block' && sel.node.type.name !== 'image-inline') return
+    const s = sel.node.attrs.src
+    if (typeof s === 'string' && s) imageSrc = s
+  })
+  if (!imageSrc) return
+  e.preventDefault()
+  void copyImageFromUrl(imageSrc)
+}
+
+// ---- 图片右键菜单（复制图片）----
+const imgCtx = ref<{ x: number; y: number; src: string } | null>(null)
+const imgCtxItems = computed<ContextMenuItem[]>(() => [
+  {
+    label: '复制图片',
+    onClick: () => {
+      const s = imgCtx.value?.src
+      if (s) void copyImageFromUrl(s)
+    },
+  },
+])
+
+/** 图片右键：弹「复制图片」菜单（替代默认菜单）；正文其余位置不干预。
+ *  编辑 / 仅预览 / 分屏预览同一套口径：命中块图 wrapper 或行内图才接管。
+ *  ⚠️ 打开菜单必须 stopPropagation：Chromium 在可信事件的相邻监听器之间清空微任务，
+ *  这里 imgCtx 赋值后菜单已在微任务里渲染成 visible，事件若继续冒泡到 window，
+ *  ContextMenu 自己的 globalClose 会当场把刚开的菜单关掉（表现：菜单闪现即消失） */
+function onEditorContextMenu(e: MouseEvent) {
+  const target = e.target
+  if (!(target instanceof Element)) return
+  let src = ''
+  const block = target.closest('.milkdown-image-block')
+  if (block) {
+    // caption 输入框 / 操作钮上右键保持默认行为
+    if (target.closest('.caption-input, .operation')) return
+    const img = block.querySelector<HTMLImageElement>('img[data-type="image-block"]')
+    src = img ? img.currentSrc || img.src : ''
+  } else {
+    const inlineImg = target.closest<HTMLImageElement>('img.image-inline')
+    src = inlineImg ? inlineImg.currentSrc || inlineImg.src : ''
+  }
+  if (!src) return
+  e.preventDefault()
+  e.stopPropagation()
+  imgCtx.value = { x: e.clientX, y: e.clientY, src }
 }
 
 watch(previewSrc, (v) => {
@@ -1844,6 +2241,8 @@ const EDITOR_FLOAT_UI_SELECTOR =
 
 function onEditorAreaMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
+  // 仅预览是只读阅读态：不抢焦点，preventDefault 反而会阻断用户的拖选复制
+  if (mode.value === 'preview') return
   const root = rootEl.value
   if (!root) return
   const target = e.target
@@ -1930,7 +2329,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
         <button
           class="icon-btn ed-beautify-btn"
           type="button"
-          title="AI 深度整理（语义重排，应用前可预览）"
+          title="AI 深度整理（选中文字则只整理选中部分；应用前可预览）"
           aria-label="AI 深度整理"
           :disabled="!canBeautify"
           @click="openAiTransform"
@@ -1951,7 +2350,8 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           >
             <PencilLine v-if="item.id === 'wysiwyg'" :size="13" :stroke-width="2" />
             <Columns2 v-else-if="item.id === 'split'" :size="13" :stroke-width="2" />
-            <Code2 v-else :size="13" :stroke-width="2" />
+            <Code2 v-else-if="item.id === 'source'" :size="13" :stroke-width="2" />
+            <Eye v-else :size="13" :stroke-width="2" />
           </button>
         </div>
       </header>
@@ -1972,7 +2372,15 @@ function onEditorAreaMouseDown(e: MouseEvent) {
       <!-- 编辑区 + 双链侧面板（全高） -->
       <div class="ed-body">
         <div class="ed-main">
-          <div v-if="mode === 'wysiwyg'" ref="rootEl" class="crepe-root" @mousedown.capture="onEditorAreaMouseDown"></div>
+          <!-- 实时预览与仅预览共用同一个 Crepe 实例（v-if 同分支保住 DOM 不重建、切换不丢
+               滚动位置）：仅预览 = 同一渲染器切只读，排版与编辑态像素级一致，CSS 只隐藏编辑入口 -->
+          <div
+            v-if="isLiveMode(mode)"
+            ref="rootEl"
+            class="crepe-root"
+            :class="{ 'editor-previewing': mode === 'preview' }"
+            @mousedown.capture="onEditorAreaMouseDown"
+          ></div>
           <textarea
             v-else-if="mode === 'source'"
             ref="sourceEl"
@@ -1996,15 +2404,9 @@ function onEditorAreaMouseDown(e: MouseEvent) {
               @keydown="onSourceKeydown"
               @scroll="syncPreviewScroll"
             />
-            <div
-              v-if="localContent.trim()"
-              ref="previewEl"
-              class="md-preview"
-              aria-label="预览"
-              v-html="previewHtml"
-              @click="onPreviewClick"
-            />
-            <p v-else class="md-preview md-preview-empty">输入 / 呼出更多功能…</p>
+            <!-- 分屏右侧：只读 Crepe（与编辑/仅预览同一渲染器，格式完全一致），
+                 源码侧编辑经 300ms 防抖单事务刷新；editor-previewing 隐藏编辑入口并放开文字选择 -->
+            <div ref="previewRootEl" class="crepe-root editor-previewing" aria-label="预览"></div>
           </div>
         </div>
 
@@ -2153,11 +2555,29 @@ function onEditorAreaMouseDown(e: MouseEvent) {
         @click="previewSrc = ''"
       >
         <img :src="previewSrc" alt="图片预览" @click.stop />
+        <button
+          class="lb-copy"
+          type="button"
+          aria-label="复制图片"
+          title="复制图片"
+          @click.stop="copyImageFromUrl(previewSrc)"
+        >
+          <Copy :size="16" :stroke-width="2" />
+        </button>
         <button class="lb-close" type="button" aria-label="关闭预览" title="关闭 (Esc)" @click="previewSrc = ''">
           <X :size="16" :stroke-width="2" />
         </button>
       </div>
     </Teleport>
+
+    <!-- 图片右键菜单（复制图片；ContextMenu 自带定位钳制与点击外部/Esc 关闭） -->
+    <ContextMenu
+      :visible="!!imgCtx"
+      :x="imgCtx?.x ?? 0"
+      :y="imgCtx?.y ?? 0"
+      :items="imgCtxItems"
+      @close="imgCtx = null"
+    />
 
     <!-- AI 深度整理：流式预览 + 应用/放弃（瞬态表面，Teleport 到 body；Esc/遮罩关闭=放弃） -->
     <Teleport to="body">
@@ -2172,13 +2592,17 @@ function onEditorAreaMouseDown(e: MouseEvent) {
         <div class="modal-card ai-card">
           <header class="ai-head">
             <WandSparkles :size="14" :stroke-width="1.8" class="ai-head-icon" />
-            <span class="ai-title">AI 深度整理</span>
+            <span class="ai-title">{{ aiScope === 'selection' ? 'AI 深度整理 · 选中片段' : 'AI 深度整理' }}</span>
             <button class="icon-btn ai-close" type="button" title="关闭 (Esc)" aria-label="关闭" @click="closeAiDialog">
               <X :size="14" :stroke-width="2" />
             </button>
           </header>
           <p class="ai-privacy">
-            笔记全文将发送给你配置的 AI 模型做语义重排；应用前不会改动笔记，应用后可 Ctrl+Z 一步撤销。
+            {{
+              aiScope === 'selection'
+                ? '选中片段将发送给你配置的 AI 模型做语义重排；应用前不会改动笔记，应用后只替换选中部分，可 Ctrl+Z 一步撤销。'
+                : '笔记全文将发送给你配置的 AI 模型做语义重排；应用前不会改动笔记，应用后可 Ctrl+Z 一步撤销。'
+            }}
           </p>
           <div class="ai-body" aria-live="polite">
             <p v-if="aiState === 'streaming' && !aiResult" class="ai-status">正在整理…</p>
@@ -2199,7 +2623,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
                 :disabled="aiState !== 'done' || !aiMarkdown"
                 @click="applyAiResult"
               >
-                应用到笔记
+                {{ aiScope === 'selection' ? '替换选中片段' : '应用到笔记' }}
               </button>
             </div>
           </footer>
@@ -2680,13 +3104,16 @@ function onEditorAreaMouseDown(e: MouseEvent) {
   padding: 12px 14px;
   color: var(--text-1);
   line-height: 1.6;
+  /* 预览内容允许鼠标拖选复制（全局 body 默认禁选、只放行 input/textarea，这里单独放开；
+     粘出去的是浏览器对渲染结果的原生所见即所得文本） */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .md-preview-empty {
   margin: 0;
   color: var(--text-4);
 }
-
 .md-preview :deep(p),
 .md-preview :deep(ul),
 .md-preview :deep(ol),
@@ -3043,6 +3470,8 @@ function onEditorAreaMouseDown(e: MouseEvent) {
   cursor: default;
 }
 
+/* 灯箱右上角动作钮（复制图片 / 关闭）共用一套圆形钮样式，复制钮排在关闭钮左侧 */
+.lb-copy,
 .lb-close {
   position: absolute;
   top: 20px;
@@ -3061,11 +3490,17 @@ function onEditorAreaMouseDown(e: MouseEvent) {
   transition: color 0.12s, border-color 0.12s, transform 0.12s;
 }
 
+.lb-copy {
+  right: 62px;
+}
+
+.lb-copy:hover,
 .lb-close:hover {
   color: var(--text-1);
   border-color: var(--border-strong);
 }
 
+.lb-copy:active,
 .lb-close:active {
   transform: scale(0.96);
 }
@@ -3224,11 +3659,36 @@ html[data-wallpaper-clear='1'] .crepe-root .milkdown {
 }
 
 /* ---- 图片尺寸接管 ----
-   Crepe onImageLoad 把图片高度锁成像素（style.height），窗口放大后图片不跟随变宽。
+   Crepe onImageLoad 把图片高度锁为像素（style.height），窗口放大后图片不跟随变宽。
    这里解锁高度让宽度成为唯一尺寸维度：ratio=1（默认）→ max-width:100% 响应式占满内容区；
    ratio<1（用户拖拽调整过，见 NoteEditor 宽度把手）→ 按百分比定宽，同样随窗口缩放 */
 .crepe-root .milkdown .milkdown-image-block img {
   height: auto !important;
+}
+
+/* ---- 仅预览（同一个 Crepe 实例切 editable=false）----
+   排版与编辑态天然一致，这里只做两件事：隐藏编辑入口（块把手/选中工具栏/图片说明输入与
+   操作钮/宽度把手/链接编辑钮/占位符），放开文字选择——contenteditable=false 后 body 的
+   user-select:none 不再被「可编辑豁免」，不显式放开就选不了字、复制不了 */
+.crepe-root.editor-previewing .milkdown-block-handle,
+.crepe-root.editor-previewing .milkdown-toolbar,
+.crepe-root.editor-previewing .milkdown-link-preview .link-edit-button {
+  display: none !important;
+}
+.crepe-root.editor-previewing .ProseMirror {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+.crepe-root.editor-previewing .milkdown-image-block .caption-input,
+.crepe-root.editor-previewing .milkdown-image-block .operation {
+  pointer-events: none;
+}
+.crepe-root.editor-previewing .milkdown-image-block .image-wrapper::after {
+  display: none;
+}
+.crepe-root.editor-previewing .crepe-placeholder::before {
+  content: none;
 }
 
 /* Crepe 内置高度把手停用（row-resize 调高度的交互不可见也不直观，改为宽度把手） */

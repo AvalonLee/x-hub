@@ -868,6 +868,7 @@ pub fn run() {
             commands::import_wallpaper,
             commands::cleanup_wallpapers,
             commands::import_note_image,
+            commands::copy_note_image,
             commands::inspect_path,
             commands::scan_installed_apps,
             commands::scan_desktop,

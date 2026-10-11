@@ -768,6 +768,42 @@ mod tests {
         let bytes = png.into_inner();
         assert_eq!(transcode_image_bytes(&bytes, ".png").unwrap(), bytes);
     }
+
+    /// BMP 载荷剥文件头、PNG 载荷原样直通（写剪贴板不做无谓重编码）
+    #[test]
+    fn clipboard_payload_bmp_strips_header_png_passthrough() {
+        let bmp = bmp32_file(2, 2, &[[5, 6, 7, 255]; 4]);
+        assert_eq!(
+            clipboard_image_payload(&bmp).unwrap(),
+            bmp[14..].to_vec(),
+            "BMP 载荷应为剥掉 14 字节文件头的 CF_DIB"
+        );
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        assert_eq!(clipboard_image_payload(&bytes).unwrap(), bytes);
+    }
+
+    /// 非 BMP/PNG 源（笔记图片的 jpg/webp/gif 等）必须转码成 PNG 再上剪贴板：
+    /// PNG 剪贴板格式里放 JPEG 字节，读取方按 PNG 解码必然拿到坏图
+    #[test]
+    fn clipboard_payload_transcodes_other_formats_to_png() {
+        let mut jpg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(3, 2)
+            .write_to(&mut jpg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let payload =
+            clipboard_image_payload(&jpg.into_inner()).expect("JPEG 应转码为 PNG 载荷");
+        assert!(payload.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]));
+        let decoded = image::load_from_memory(&payload).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+
+        // 坏字节（既不是 BMP/PNG 也解不出图）明确报错，不静默写坏数据
+        assert!(clipboard_image_payload(b"not an image").is_err());
+    }
 }
 
 /// 分配 Global 内存并写入字节、SetClipboardData（调用方需已 OpenClipboard 且 EmptyClipboard）
@@ -790,16 +826,29 @@ unsafe fn set_global_data(format: u32, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// 写入图片到剪贴板：BMP 快照写 CF_DIB，PNG 快照写 PNG 剪贴板格式。
+/// 图片文件字节 → 写入剪贴板的载荷：BMP 剥 14 字节文件头成 CF_DIB；PNG 原样；
+/// 其它格式（笔记图片的 jpg/webp/gif 等）解码重编码成 PNG——PNG 剪贴板格式里放
+/// 别的编码字节，读取方按 PNG 解码必然拿到坏图。gif 只取首帧（位图剪贴板带不走动画）。
+fn clipboard_image_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() > 2 && &bytes[0..2] == b"BM" {
+        return Ok(bmp_to_dib(bytes).to_vec());
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Ok(bytes.to_vec());
+    }
+    let img = image::load_from_memory(bytes).map_err(|e| format!("解码图片失败: {}", e))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| format!("编码图片失败: {}", e))?;
+    Ok(out.into_inner())
+}
+
+/// 写入图片到剪贴板：BMP 写 CF_DIB，其余写 PNG 剪贴板格式（jpg/webp/gif 先转码 PNG）。
 /// 写回后记录回声指纹，抑制监听线程重复入库。
 pub fn set_clipboard_image(path: &str) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取图片快照失败: {}", e))?;
     let is_bmp = bytes.len() > 2 && &bytes[0..2] == b"BM";
-    let data: Vec<u8> = if is_bmp {
-        bmp_to_dib(&bytes).to_vec()
-    } else {
-        bytes.clone()
-    };
+    let data = clipboard_image_payload(&bytes)?;
     // 回声指纹基于「写回剪贴板的实际字节」（PNG 原始字节 / 剥掉文件头的 DIB），
     // 与监听端读到的一致，确保粘贴后能被正确识别为自身写入回声。
     let hash = hash_bytes(&data);
