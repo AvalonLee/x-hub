@@ -1371,7 +1371,10 @@ function attachImageListeners() {
   root.addEventListener('keydown', onCrepeKeydown, true)
   root.addEventListener('copy', onEditorCopy)
   root.addEventListener('contextmenu', onEditorContextMenu)
+  // 代码块「复制」按钮反馈：文档级委托，一次覆盖主编辑区/仅预览/分屏预览三处（见 onCopyButtonClick）
+  document.addEventListener('click', onCopyButtonClick, true)
   detachImageListeners = () => {
+    document.removeEventListener('click', onCopyButtonClick, true)
     root.removeEventListener('load', onEditorImgLoad, true)
     root.removeEventListener('click', onEditorClick)
     root.removeEventListener('pointerdown', onEditorPointerDown, true)
@@ -1380,6 +1383,58 @@ function attachImageListeners() {
     root.removeEventListener('contextmenu', onEditorContextMenu)
     detachImageListeners = () => {}
   }
+}
+
+// ---- 代码块「复制」按钮点击反馈（用户反馈②）----
+// Crepe 的 CopyButton（@milkdown/components）本身无点击状态：点完仍是复制图标 + "Copy"。
+// 这里在 DOM 层接管——点击后图标换成对勾、文案换「已复制」并转绿，1.5s 后还原。
+const COPY_FEEDBACK_MS = 1500
+const COPY_CHECK_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="none"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></svg>'
+const copyFeedbackTimers = new WeakMap<HTMLButtonElement, number>()
+
+/** 按钮内容 = [<span.milkdown-icon>, 文本节点 "Copy"]，取那个非空文本节点 */
+function copyBtnLabelNode(btn: HTMLButtonElement): ChildNode | null {
+  for (const node of Array.from(btn.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE && (node.nodeValue ?? '').trim()) return node
+  }
+  return null
+}
+
+function onCopyButtonClick(e: MouseEvent) {
+  const t = e.target
+  if (!(t instanceof Element)) return
+  const btn = t.closest<HTMLButtonElement>('.milkdown-code-block .copy-button')
+  if (!btn) return
+  // 仅接管本组件内（主编辑区 / 分屏预览）的代码块，避免误伤对话区等其他表面的复制按钮
+  const owner = rootEl.value
+  const preview = previewRootEl.value
+  if (!(owner && owner.contains(btn)) && !(preview && preview.contains(btn))) return
+  const icon = btn.querySelector<HTMLElement>('.milkdown-icon')
+  const label = copyBtnLabelNode(btn)
+  if (btn.dataset.copying !== '1') {
+    // 首次记录原始图标/文案，供定时还原
+    btn.dataset.copying = '1'
+    btn.dataset.iconHtml = icon?.innerHTML ?? ''
+    btn.dataset.labelText = label?.nodeValue ?? 'Copy'
+  }
+  if (icon) icon.innerHTML = COPY_CHECK_ICON
+  if (label) label.nodeValue = '已复制'
+  btn.classList.add('is-copied')
+  const prev = copyFeedbackTimers.get(btn)
+  if (prev) clearTimeout(prev)
+  copyFeedbackTimers.set(
+    btn,
+    window.setTimeout(() => {
+      copyFeedbackTimers.delete(btn)
+      const ic = btn.querySelector<HTMLElement>('.milkdown-icon')
+      const lb = copyBtnLabelNode(btn)
+      if (ic && btn.dataset.iconHtml != null) ic.innerHTML = btn.dataset.iconHtml
+      if (lb && btn.dataset.labelText != null) lb.nodeValue = btn.dataset.labelText
+      btn.classList.remove('is-copied')
+      delete btn.dataset.copying
+    }, COPY_FEEDBACK_MS),
+  )
 }
 
 function onEditorImgLoad(e: Event) {
@@ -3593,6 +3648,60 @@ html[data-wallpaper-clear='1'] .crepe-root .milkdown {
   white-space: break-spaces;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+/* 代码块内放行文字选取/光标：body 全局 user-select:none 会继承进来，而 .cm-content 虽是
+   contenteditable=true，浏览器只在「auto」值下给可编辑豁免，body 显式写的 none 不享受该豁免
+   → 表现为点不进代码块、没有光标、选不中内容（用户反馈②）。显式放开内容与行。 */
+.crepe-root .milkdown .milkdown-code-block .cm-content,
+.crepe-root .milkdown .milkdown-code-block .cm-line {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 代码块底色与边界：Crepe 默认取 --crepe-color-surface（= --input-bg），与编辑区同色，
+   无壁纸主题下整块与背景糊在一起分不清（用户反馈③）。给一层略深底色 + 细描边，
+   任何主题/壁纸下都能看出代码块范围；内层 CodeMirror/行号槽背景改透明以透出该底色。 */
+.crepe-root .milkdown .milkdown-code-block {
+  background: color-mix(in srgb, var(--text-3) 8%, var(--input-bg));
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.crepe-root .milkdown .milkdown-code-block .cm-editor,
+.crepe-root .milkdown .milkdown-code-block .cm-gutters {
+  background: transparent;
+}
+
+/* 行号槽的「当前行」底色：CodeMirror basicSetup 的 highlightActiveLineGutter/highlightActiveLine
+   会按「光标所在行」上底色（暗色主题近黑），而 CodeMirror 始终存在一个光标（初始在位置 0），
+   于是空代码块未聚焦时行号「1」也带一块底色，看着像行号被选中（用户反馈①）。改为仅编辑器
+   聚焦（有光标）时显示，未聚焦一律透明。 */
+.crepe-root .milkdown .milkdown-code-block .cm-editor:not(.cm-focused) .cm-activeLineGutter,
+.crepe-root .milkdown .milkdown-code-block .cm-editor:not(.cm-focused) .cm-activeLine {
+  background: transparent;
+}
+
+/* 仅预览 / 分屏预览（只读 Crepe）里代码块仍是 CodeMirror：鼠标悬停出现文本 I 形光标、行号
+   槽也带「当前行」底色，看着像可编辑（用户反馈③）。只读态去掉 I 形光标、闪烁光标与行号选中
+   态（保留右上角复制按钮）。 */
+.crepe-root.editor-previewing .milkdown-code-block .cm-content {
+  cursor: default;
+  caret-color: transparent;
+}
+.crepe-root.editor-previewing .milkdown-code-block .cm-activeLineGutter,
+.crepe-root.editor-previewing .milkdown-code-block .cm-activeLine {
+  background: transparent;
+}
+
+/* 代码块「复制」按钮点击反馈：图标换对勾、文案换「已复制」并转绿，1.5s 后还原（用户反馈②）。
+   转绿时保持可见（不依赖 hover），让用户看清已复制状态。 */
+.crepe-root .milkdown .milkdown-code-block .tools .tools-button-group button.copy-button.is-copied {
+  color: var(--c-green-ink);
+  opacity: 1;
+}
+.crepe-root .milkdown .milkdown-code-block .tools .tools-button-group button.copy-button.is-copied svg {
+  fill: var(--c-green-ink);
 }
 
 .crepe-root .milkdown .milkdown-table-block table {
