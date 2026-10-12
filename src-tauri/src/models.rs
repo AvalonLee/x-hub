@@ -61,6 +61,10 @@ pub struct ResourceZone {
     /// 分区框高度（卡片行数，下限——内容超出按行自动膨胀），新建默认 2
     #[serde(default = "default_zone_rows")]
     pub rows: i64,
+    /// 分区内卡片/图标的缩放覆盖（null = 跟随全局 suda_icon_scale）。
+    /// issue #37：各分区应用数量差别大，密度需求不同，允许分区级覆盖全局档位
+    #[serde(default)]
+    pub scale: Option<f64>,
 }
 
 fn default_zone_cols() -> i64 {

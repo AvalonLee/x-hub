@@ -346,11 +346,13 @@ fn migrate(conn: &Connection) -> Result<()> {
           name TEXT NOT NULL UNIQUE,
           sort_order INTEGER NOT NULL DEFAULT 0,
           cols INTEGER NOT NULL DEFAULT 3,
-          rows INTEGER NOT NULL DEFAULT 2
+          rows INTEGER NOT NULL DEFAULT 2,
+          scale REAL
         );
         ",
     )?;
-    // 老库（分区功能首版建的表）补尺寸列，默认 3×2
+    // 老库（分区功能首版建的表）补尺寸列，默认 3×2；scale 为分区级图标缩放覆盖
+    // （NULL = 跟随全局 suda_icon_scale，issue #37）
     let zone_cols: Vec<String> = conn
         .prepare("PRAGMA table_info(resource_zones)")?
         .query_map([], |row| row.get(1))?
@@ -366,6 +368,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE resource_zones ADD COLUMN rows INTEGER NOT NULL DEFAULT 2",
             [],
         )?;
+    }
+    if !zone_cols.iter().any(|c| c == "scale") {
+        conn.execute("ALTER TABLE resource_zones ADD COLUMN scale REAL", [])?;
     }
     let cols: Vec<String> = conn
         .prepare("PRAGMA table_info(resources)")?

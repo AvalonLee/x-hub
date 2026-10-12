@@ -37,6 +37,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import SubcatCascadeMenu from './SubcatCascadeMenu.vue'
 import SudaFormDialog from './SudaFormDialog.vue'
 import SudaScanDialog, { type ScanItem, type ScanMode } from './SudaScanDialog.vue'
+import AppSelect, { type AppSelectOption } from './AppSelect.vue'
 
 const store = useStore()
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
@@ -59,8 +60,39 @@ const prefill = ref<{
   kind?: 'app' | 'web' | 'file'
   category?: string | null
   isDir?: boolean
+  /** 拖拽落点命中的分区（issue #38） */
+  zoneId?: number | null
 } | null>(null)
 let unlistenDrop: (() => void) | null = null
+
+// ---- 拖拽落点 → 分区命中（issue #38）：webview 级 DnD 事件只给文件路径与物理坐标，
+// 必须自行把物理坐标换算成 CSS 像素、再对各分区块矩形命中，否则外拖一律落「未分区」----
+/** 拖拽指针当前悬停到的分区块 key（zkeyOf 口径；未分区块 = ''）；null = 未命中任何块 */
+const dropZoneKey = ref<string | null>(null)
+
+/** 物理坐标（devicePixelRatio 换算）→ 命中的分区块 key；无分区模式恒 null */
+function zoneKeyAtPoint(x: number, y: number): string | null {
+  if (!zoneMode.value) return null
+  const blocks = bodyRef.value?.querySelectorAll<HTMLElement>('.suda-zone') ?? []
+  for (const b of blocks) {
+    const r = b.getBoundingClientRect()
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return b.dataset.zkey ?? null
+  }
+  return null
+}
+
+function zoneKeyAtPosition(p: { x: number; y: number }): string | null {
+  const dpr = window.devicePixelRatio || 1
+  return zoneKeyAtPoint(p.x / dpr, p.y / dpr)
+}
+
+/** 落点命中的分区 id（未分区/无分区模式 = null） */
+function dropZoneIdAtPosition(p: { x: number; y: number }): number | null {
+  const key = zoneKeyAtPosition(p)
+  if (!key) return null
+  const id = Number(key)
+  return Number.isFinite(id) ? id : null
+}
 
 onMounted(async () => {
   void installedBrowsers() // 预热浏览器列表，右键菜单即开即用
@@ -69,24 +101,36 @@ onMounted(async () => {
   unlistenDrop = await webview.onDragDropEvent((event) => {
     const ev = event.payload
     if (hasOverlayModal.value || parsing.value) return
-    if (ev.type === 'enter' || ev.type === 'over') {
-      if (ev.type === 'over') return
-      if (!ev.paths.length) return
-      // 整个窗口均可拖拽导入：enter 即亮起全屏遮罩，
-      // 释放时不再校验位置（遮罩提示居中，用户常移到提示处释放，二次校验会误丢 drop）
-      dropping.value = true
-    } else if (ev.type === 'leave') {
-      dropping.value = false
-    } else if (ev.type === 'drop') {
-      dropping.value = false
-      const file = ev.paths?.[0]
-      if (file) {
-        // 程序解析耗时较长：立刻切到“正在识别”遮罩，避免无反馈空白期
-        const ext = file.split('.').pop()?.toLowerCase()
-        if (ext === 'exe' || ext === 'lnk') {
-          parsing.value = file.split(/[\\/]/).pop() ?? file
+    switch (ev.type) {
+      case 'enter':
+        if (!ev.paths.length) return
+        // 整个窗口均可拖拽导入：enter 即亮起全屏遮罩，
+        // 释放时不再校验位置（遮罩提示居中，用户常移到提示处释放，二次校验会误丢 drop）
+        dropping.value = true
+        dropZoneKey.value = zoneKeyAtPosition(ev.position)
+        break
+      case 'over':
+        // 实时更新落点高亮的分区（拖过不同分区即切换）
+        dropZoneKey.value = zoneKeyAtPosition(ev.position)
+        break
+      case 'leave':
+        dropping.value = false
+        dropZoneKey.value = null
+        break
+      case 'drop': {
+        dropping.value = false
+        const hitZoneId = dropZoneIdAtPosition(ev.position)
+        dropZoneKey.value = null
+        const file = ev.paths[0]
+        if (file) {
+          // 程序解析耗时较长：立刻切到“正在识别”遮罩，避免无反馈空白期
+          const ext = file.split('.').pop()?.toLowerCase()
+          if (ext === 'exe' || ext === 'lnk') {
+            parsing.value = file.split(/[\\/]/).pop() ?? file
+          }
+          void handleDrop(file, hitZoneId)
         }
-        void handleDrop(file)
+        break
       }
     }
   })
@@ -105,7 +149,7 @@ function findDuplicateTarget(target: string): Resource | undefined {
   return store.state.resources.find((r) => r.target && normalizeTarget(r.target) === key)
 }
 
-async function handleDrop(file: string) {
+async function handleDrop(file: string, zoneId: number | null = null) {
   // 命中已有资源的路径直接提示跳过：exe/lnk 还可省去 PowerShell 解析
   const direct = findDuplicateTarget(file)
   if (direct) {
@@ -123,7 +167,7 @@ async function handleDrop(file: string) {
         showToast(`「${dup.name}」已在速达中，已跳过重复添加`)
         return
       }
-      prefill.value = { name: info.name, target: info.target, icon: info.icon, kind: 'app' }
+      prefill.value = { name: info.name, target: info.target, icon: info.icon, kind: 'app', zoneId }
       editing.value = null
       formVisible.value = true
       showToast(`已识别「${info.name}」，请点击添加确认`)
@@ -137,7 +181,7 @@ async function handleDrop(file: string) {
   try {
     const info = await tauriApi.inspectPath(file)
     const category = categorize(file, info.is_dir)
-    prefill.value = { name: info.name, target: file, kind: 'file', category, isDir: info.is_dir }
+    prefill.value = { name: info.name, target: file, kind: 'file', category, isDir: info.is_dir, zoneId }
     editing.value = null
     formVisible.value = true
     showToast(`已识别「${info.name}」，请点击添加确认`)
@@ -378,6 +422,28 @@ function zkeyOf(b: ZoneBlock): string {
   return b.key == null ? '' : String(b.key)
 }
 
+// ---- 图标/卡片大小（issue #37）：全局 4 档离散缩放，分区可覆盖；档位经 CSS 变量
+// （--suda-scale）乘到卡片宽/行高/图标/内距上，缩放把手的吸附常量同步乘系数 ----
+const ICON_SCALE_OPTIONS: AppSelectOption[] = [
+  { value: '0.8', label: '小' },
+  { value: '1', label: '标准' },
+  { value: '1.2', label: '大' },
+  { value: '1.4', label: '特大' },
+]
+/** 全局档位（config.suda_icon_scale；缺省/异常值回退 1.0） */
+const globalIconScale = computed(() => store.state.config.suda_icon_scale || 1)
+const iconScaleValue = computed<string>({
+  get: () => String(globalIconScale.value),
+  set: (v) => void store.setSudaIconScale(Number(v)),
+})
+function scaleLabel(s: number): string {
+  return ICON_SCALE_OPTIONS.find((o) => Number(o.value) === s)?.label ?? '标准'
+}
+/** 分区实际生效的缩放：分区覆盖优先，未覆盖（null）跟随全局 */
+function effectiveScale(zone: ResourceZone | null): number {
+  return zone?.scale ?? globalIconScale.value
+}
+
 // ---- 分区模式拖拽：跨区拖 = 改归属 + 插入序，reorder_resources_zoned 单命令原子落盘 ----
 const bodyRef = ref<HTMLElement | null>(null)
 const zdrag = useSudaZoneDrag({
@@ -484,9 +550,14 @@ function zoneSizeOf(b: ZoneBlock): { cols: number; rows: number } {
 }
 
 function zoneStyleOf(b: ZoneBlock): Record<string, string> {
-  if (!b.zone) return {}
+  // 未分区块/平铺块跟随全局；分区块用其覆盖值（无覆盖即全局）
+  if (!b.zone) return { '--suda-scale': String(globalIconScale.value) }
   const { cols, rows } = zoneSizeOf(b)
-  return { '--zone-cols': String(cols), '--zone-rows': String(rows) }
+  return {
+    '--zone-cols': String(cols),
+    '--zone-rows': String(rows),
+    '--suda-scale': String(effectiveScale(b.zone)),
+  }
 }
 
 function onZoneResizeDown(e: PointerEvent, zone: ResourceZone) {
@@ -498,9 +569,11 @@ function onZoneResizeDown(e: PointerEvent, zone: ResourceZone) {
   const body = bodyRef.value
   if (!grid || !body) return
   const rect = grid.getBoundingClientRect()
-  // 与 CSS 常量同步：卡宽 124 / 行高 100 / 间距 10（.suda-card 与 .suda-zone-grid 的 --suda-row-h）
-  const CELL_W = 124
-  const CELL_H = 100
+  // 与 CSS 常量同步：卡宽 124 / 行高 100 / 间距 10（.suda-card 与 .suda-zone-grid 的 --suda-row-h）；
+  // 卡宽/行高随分区图标缩放档位等比放大，间距固定
+  const scale = effectiveScale(zone)
+  const CELL_W = 124 * scale
+  const CELL_H = 100 * scale
   const GAP = 10
   // 宽度上限 = 陈列区可用宽度能容纳的整卡数（区内边距 10×2 + 边框 1×2），别拖出横向滚动
   const maxCols = Math.max(1, Math.floor((body.clientWidth - 22 + GAP) / (CELL_W + GAP)))
@@ -613,9 +686,13 @@ async function onDeleteZone(zone: ResourceZone) {
   })
 }
 
-function zoneMenuItems(zone: ResourceZone): ContextMenuItem[] {
+function zoneMenuItems(zone: ResourceZone, anchor: { clientX: number; clientY: number }): ContextMenuItem[] {
   return [
-    { label: '重命名', onClick: () => startZoneRename(zone.id, zone.name) },
+    {
+      label: `图标大小：${zone.scale == null ? '跟随全局' : scaleLabel(zone.scale)}`,
+      onClick: () => openZoneScaleMenu(anchor, zone),
+    },
+    { label: '重命名', dividerBefore: true, onClick: () => startZoneRename(zone.id, zone.name) },
     { label: '上移', onClick: () => moveZoneBy(zone.id, -1) },
     { label: '下移', onClick: () => moveZoneBy(zone.id, 1) },
     {
@@ -627,15 +704,30 @@ function zoneMenuItems(zone: ResourceZone): ContextMenuItem[] {
   ]
 }
 
+/** 分区级图标大小二级菜单（沿用原右键坐标，与「移动到分区」同款单实例换内容） */
+function openZoneScaleMenu(anchor: { clientX: number; clientY: number }, zone: ResourceZone) {
+  const items: ContextMenuItem[] = [
+    {
+      label: zone.scale == null ? '✓ 跟随全局' : '跟随全局',
+      onClick: () => void store.setZoneScale(zone.id, null),
+    },
+    ...ICON_SCALE_OPTIONS.map((o) => {
+      const v = Number(o.value)
+      return { label: zone.scale === v ? `✓ ${o.label}` : o.label, onClick: () => void store.setZoneScale(zone.id, v) }
+    }),
+  ]
+  openMenu(anchor as MouseEvent, items)
+}
+
 function onZoneContext(e: MouseEvent, zone: ResourceZone) {
   e.preventDefault()
   if (batchMode.value) return
-  openMenu(e, zoneMenuItems(zone))
+  openMenu(e, zoneMenuItems(zone, e))
 }
 
 function onZoneMore(e: MouseEvent, zone: ResourceZone) {
   if (batchMode.value) return
-  openMenu(e, zoneMenuItems(zone))
+  openMenu(e, zoneMenuItems(zone, e))
 }
 
 // ---- 右键「移动到分区」：点开二级列表（分区 + 未分区；当前归属不出现） ----
@@ -1179,7 +1271,7 @@ function cardAccentStyle(r: Resource) {
 </script>
 
 <template>
-  <section ref="rootRef" class="card suda">
+  <section ref="rootRef" class="card suda" :style="{ '--suda-scale': String(globalIconScale) }">
     <header class="suda-header">
       <h2 class="suda-title">速达</h2>
       <div class="suda-header-actions">
@@ -1207,6 +1299,14 @@ function cardAccentStyle(r: Resource) {
           </button>
         </template>
         <template v-else>
+          <span class="suda-size-select" title="卡片与图标大小（分区可单独覆盖）">
+            <AppSelect
+              v-model="iconScaleValue"
+              compact
+              :options="ICON_SCALE_OPTIONS"
+              aria-label="图标大小"
+            />
+          </span>
           <button
             v-if="visibleResources.length > 0"
             class="icon-btn scan"
@@ -1399,6 +1499,7 @@ function cardAccentStyle(r: Resource) {
               flat: !zoneMode,
               'unzoned-block': zoneMode && g.zone == null,
               'is-drop-target': zoneMode && zoneDropActive(g),
+              'is-drop-hover': zoneMode && dropZoneKey === zkeyOf(g),
               'is-zone-dragging': zoneDragKey === g.key,
               'is-resizing': zoneResizing != null && zoneResizing.id === g.zone?.id,
             }"
@@ -1695,6 +1796,24 @@ function cardAccentStyle(r: Resource) {
   transform: none;
 }
 
+/* 图标大小档位下拉（issue #37）：贴合头部 30px 图标按钮的紧凑档。
+   AppSelect 根是 fragment，父级 scoped 选择器匹配不到内部，须 :deep 穿透 */
+.suda-size-select {
+  display: inline-flex;
+}
+.suda-size-select :deep(.app-select-trigger) {
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: 0.75rem;
+  background: var(--bg-card-soft);
+  color: var(--text-3);
+}
+.suda-size-select :deep(.app-select-trigger:hover),
+.suda-size-select :deep(.app-select-trigger[aria-expanded='true']) {
+  border-color: color-mix(in srgb, var(--brand-500) 45%, transparent);
+  color: var(--brand-500);
+}
+
 /* tabs 行：nav + 「分区」入口同排 */
 .suda-tabs-row {
   display: flex;
@@ -1730,8 +1849,12 @@ function cardAccentStyle(r: Resource) {
 /* ---- 分区块（「全部」tab 成组陈列）：横向流式并排（新建往右长、放不下换行）；
         未分区与平铺块占满整行；flat = 平铺模式的无框单块 ---- */
 .suda {
-  /* 分区网格的行高单元（卡片自然高度 98px 上取整留 2px 余量）：行数尺寸以它为基准 */
-  --suda-row-h: 100px;
+  /* 分区网格的行高单元（卡片自然高度 98px 上取整留 2px 余量）：行数尺寸以它为基准；
+     卡宽/行高/图标随图标缩放档位 --suda-scale（小 0.8 / 标准 1 / 大 1.2 / 特大 1.4）等比换算 */
+  --suda-scale: 1;
+  --suda-cell-w: calc(124px * var(--suda-scale));
+  --suda-row-h: calc(100px * var(--suda-scale));
+  --suda-icon-size: calc(46px * var(--suda-scale));
 }
 .suda-zone-flow {
   display: flex;
@@ -1740,6 +1863,11 @@ function cardAccentStyle(r: Resource) {
   gap: 14px;
 }
 .suda-zone {
+  /* 分区级缩放覆盖：--suda-scale 由内联 style 按分区设置（issue #37 分区级覆盖），
+     这里据它重算派生量 —— 否则会继承 .suda 上按全局档位算好的值、覆盖失效 */
+  --suda-cell-w: calc(124px * var(--suda-scale));
+  --suda-row-h: calc(100px * var(--suda-scale));
+  --suda-icon-size: calc(46px * var(--suda-scale));
   position: relative;
   background: var(--bg-card-soft);
   border: 1px solid var(--border-soft);
@@ -1749,6 +1877,12 @@ function cardAccentStyle(r: Resource) {
   width: fit-content;
   max-width: 100%;
   transition: border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+/* 拖拽导入时落点命中的分区（issue #38）：品牌描边 + 底色提示「松手落这里」 */
+.suda-zone.is-drop-hover {
+  border-color: var(--brand-500);
+  background: color-mix(in srgb, var(--brand-500) 8%, var(--bg-card-soft));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-500) 35%, transparent);
 }
 .suda-zone.flat {
   background: transparent;
@@ -1775,7 +1909,7 @@ function cardAccentStyle(r: Resource) {
 /* 分区网格按格定宽定行：cols 列 × rows 行为**下限**占位（min-height 兜底空框），
    内容超出时 grid-auto-rows 自然生长 = 自动膨胀；吸附单元见 onZoneResizeDown 常量 */
 .suda-zone:not(.unzoned-block):not(.flat) .suda-zone-grid {
-  grid-template-columns: repeat(var(--zone-cols, 3), 124px);
+  grid-template-columns: repeat(var(--zone-cols, 3), var(--suda-cell-w));
   grid-auto-rows: var(--suda-row-h);
   min-height: calc(var(--zone-rows, 2) * (var(--suda-row-h) + 10px) - 10px);
   justify-content: start;
@@ -1986,7 +2120,7 @@ function cardAccentStyle(r: Resource) {
 }
 .suda-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, 124px);
+  grid-template-columns: repeat(auto-fill, var(--suda-cell-w));
   justify-content: space-between;
   gap: 10px;
   /* 被拖卡片拖拽期间 position:absolute，这里当它的定位上下文 */
@@ -1997,10 +2131,10 @@ function cardAccentStyle(r: Resource) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 7px;
-  width: 124px;
+  gap: calc(7px * var(--suda-scale, 1));
+  width: var(--suda-cell-w);
   min-width: 0;
-  padding: 15px 8px 12px;
+  padding: calc(15px * var(--suda-scale, 1)) calc(8px * var(--suda-scale, 1)) calc(12px * var(--suda-scale, 1));
   /* 比外层玻璃面板更实的底 + 描边 + 投影，与面板拉开层次 */
   background: var(--bg-card-solid);
   border: 1px solid var(--border-soft);
@@ -2064,9 +2198,9 @@ function cardAccentStyle(r: Resource) {
   cursor: default;
 }
 .suda-icon {
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
+  width: var(--suda-icon-size);
+  height: var(--suda-icon-size);
+  border-radius: calc(14px * var(--suda-scale, 1));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2077,18 +2211,21 @@ function cardAccentStyle(r: Resource) {
 }
 .suda-file-icon {
   background: transparent;
+  /* lucide 图标按 :size=25 出 svg，随图标缩放档位等比覆盖（否则缩放后图标偏小） */
+  width: calc(25px * var(--suda-scale, 1));
+  height: calc(25px * var(--suda-scale, 1));
 }
 .suda-icon.web-default {
   background: var(--c-green-soft);
 }
 .suda-letter {
-  font-size: 1.25rem;
+  font-size: calc(1.25rem * var(--suda-scale, 1));
   font-weight: 700;
 }
 .suda-img {
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
+  width: var(--suda-icon-size);
+  height: var(--suda-icon-size);
+  border-radius: calc(14px * var(--suda-scale, 1));
   object-fit: contain;
 }
 .suda-name {
@@ -2096,7 +2233,7 @@ function cardAccentStyle(r: Resource) {
   align-items: center;
   gap: 5px;
   max-width: 100%;
-  font-size: 0.75rem;
+  font-size: max(0.6875rem, calc(0.75rem * var(--suda-scale, 1)));
   font-weight: 500;
   color: var(--text-2);
 }
@@ -2251,11 +2388,11 @@ function cardAccentStyle(r: Resource) {
   transform: none;
 }
 .suda-drop-slot {
-  width: 124px;
+  width: var(--suda-cell-w);
   /* 跟随同行卡片的高度（不写死，避免比卡片高把整行撑起来）；
      单独占一行时仍保留一个可见的虚线框 */
   align-self: stretch;
-  min-height: 88px;
+  min-height: calc(88px * var(--suda-scale, 1));
   border: 2px dashed var(--brand-500);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--brand-500) 6%, transparent);

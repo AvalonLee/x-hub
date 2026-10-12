@@ -943,6 +943,7 @@ pub fn run() {
             commands::delete_zone,
             commands::reorder_zones,
             commands::resize_zone,
+            commands::set_zone_scale,
             commands::set_resources_zone,
             commands::reorder_resources_zoned,
             commands::set_suda_web_open_mode,

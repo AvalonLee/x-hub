@@ -194,6 +194,10 @@ pub struct AppConfig {
     /// 隐藏时整个面板区域只渲染网页，返回速达走左侧导航）
     #[serde(default)]
     pub suda_panel_toolbar: bool,
+    /// 速达卡片/图标全局缩放档位（issue #37）：0.8 小 / 1.0 标准 / 1.2 大 / 1.4 特大。
+    /// 分区级可经 resource_zones.scale 覆盖（null = 跟随此全局值）
+    #[serde(default = "one")]
+    pub suda_icon_scale: f64,
     /// 记录剪贴板图片（复制图片时落盘快照进历史，默认开启）
     #[serde(default = "default_true")]
     pub clipboard_image_enabled: bool,
@@ -495,6 +499,7 @@ impl Default for AppConfig {
             suda_web_open_mode: "panel".to_string(),
             suda_custom_modules: Vec::new(),
             suda_panel_toolbar: false,
+            suda_icon_scale: 1.0,
             clipboard_image_enabled: true,
             clipboard_file_enabled: true,
             font_scale: 1.0,

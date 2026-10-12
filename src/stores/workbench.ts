@@ -143,6 +143,7 @@ const state = reactive<StoreState>({
     suda_web_open_mode: 'panel',
     suda_custom_modules: [],
     suda_panel_toolbar: false,
+    suda_icon_scale: 1,
     clipboard_image_enabled: true,
     clipboard_file_enabled: true,
     font_scale: 1,
@@ -533,6 +534,14 @@ export function useStore() {
     if (isTauri()) await tauriApi.resizeZone(id, cols, rows)
   }
 
+  /** 分区级图标缩放覆盖（issue #37）：null = 清除覆盖、跟随全局 suda_icon_scale（乐观更新 + 持久化） */
+  async function setZoneScale(id: number, scale: number | null) {
+    const z = state.zones.find((x) => x.id === id)
+    if (!z || z.scale === scale) return
+    z.scale = scale
+    if (isTauri()) await tauriApi.setZoneScale(id, scale)
+  }
+
   /** 批量改分区归属（右键移动/删分区撤销），不动 sort_order */
   async function setResourcesZone(ids: number[], zoneId: number | null) {
     if (isTauri()) await tauriApi.setResourcesZone(ids, zoneId)
@@ -602,6 +611,13 @@ export function useStore() {
   /** 内嵌面板工具栏显隐（默认不显示；隐藏时整个面板区域只渲染网页） */
   async function setSudaPanelToolbar(v: boolean) {
     state.config.suda_panel_toolbar = v
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
+  /** 速达全局图标缩放档位（issue #37）：0.8 小 / 1.0 标准 / 1.2 大 / 1.4 特大（乐观更新 + 持久化） */
+  async function setSudaIconScale(scale: number) {
+    state.config.suda_icon_scale = scale
     if (!isTauri()) return
     await tauriApi.saveConfig(state.config)
   }
@@ -1879,6 +1895,7 @@ export function useStore() {
     removeZone,
     reorderZones,
     resizeZone,
+    setZoneScale,
     setResourcesZone,
     reorderResourcesZoned,
     setSudaWebOpenMode,
@@ -1887,6 +1904,7 @@ export function useStore() {
     sudaCustomConfigOf,
     saveSudaCustomModule,
     setSudaPanelToolbar,
+    setSudaIconScale,
     addNote,
     saveNote,
     removeNote,

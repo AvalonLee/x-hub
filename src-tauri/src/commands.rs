@@ -468,6 +468,17 @@ pub fn resize_zone(
     zone::resize(&conn, id, cols, rows)
 }
 
+/// 设置分区级图标缩放覆盖（issue #37；None = 清除覆盖，跟随全局 suda_icon_scale）
+#[tauri::command]
+pub fn set_zone_scale(
+    state: State<'_, DbState>,
+    id: i64,
+    scale: Option<f64>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    zone::set_scale(&conn, id, scale)
+}
+
 /// 批量改分区归属（右键「移动到分区」/ 删分区撤销恢复），不动 sort_order
 #[tauri::command]
 pub fn set_resources_zone(

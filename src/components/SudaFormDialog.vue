@@ -21,6 +21,8 @@ const props = defineProps<{
     kind?: 'app' | 'web' | 'file'
     category?: string | null
     isDir?: boolean
+    /** 拖拽落点命中的分区（issue #38）：预填「所属分区」，用户确认前仍可改选 */
+    zoneId?: number | null
   } | null
 }>()
 
@@ -175,6 +177,12 @@ watch(
         }
         category.value = props.prefill.category ?? defaultCategoryFor(kind.value)
         isDir.value = props.prefill.isDir ?? false
+        // 拖拽落点命中的分区（issue #38）：仅当该分区仍存在时预填，否则落未分区
+        zoneId.value =
+          props.prefill.zoneId != null &&
+          store.state.zones.some((z) => z.id === props.prefill!.zoneId)
+            ? props.prefill.zoneId
+            : null
       }
     }
   },

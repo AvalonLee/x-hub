@@ -15,12 +15,13 @@ fn row_to_zone(row: &rusqlite::Row) -> rusqlite::Result<ResourceZone> {
         sort_order: row.get(2)?,
         cols: row.get(3)?,
         rows: row.get(4)?,
+        scale: row.get(5)?,
     })
 }
 
 pub fn list(conn: &Connection) -> rusqlite::Result<Vec<ResourceZone>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, sort_order, cols, rows FROM resource_zones ORDER BY sort_order ASC, id ASC",
+        "SELECT id, name, sort_order, cols, rows, scale FROM resource_zones ORDER BY sort_order ASC, id ASC",
     )?;
     let rows = stmt.query_map([], row_to_zone)?;
     rows.collect()
@@ -58,6 +59,7 @@ pub fn create(conn: &Connection, name: &str) -> rusqlite::Result<ResourceZone> {
         sort_order: max + 1,
         cols: 3,
         rows: 2,
+        scale: None,
     })
 }
 
@@ -129,6 +131,26 @@ pub fn resize(conn: &Connection, id: i64, cols: i64, rows: i64) -> Result<(), St
     conn.execute(
         "UPDATE resource_zones SET cols = ?1, rows = ?2 WHERE id = ?3",
         params![cols, rows, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置分区级图标缩放覆盖（issue #37）。
+/// None = 清除覆盖、跟随全局 suda_icon_scale；Some 值前端只发 4 档离散值，
+/// 后端按 0.5–2.0 兜底（防手改参数产生离谱值把布局撑爆）
+pub fn set_scale(conn: &Connection, id: i64, scale: Option<f64>) -> Result<(), String> {
+    if !exists(conn, id).map_err(|e| e.to_string())? {
+        return Err(format!("NOT_FOUND: 分区 {id} 不存在"));
+    }
+    if let Some(s) = scale {
+        if !(0.5..=2.0).contains(&s) {
+            return Err("缩放系数需在 0.5–2.0 之间".into());
+        }
+    }
+    conn.execute(
+        "UPDATE resource_zones SET scale = ?1 WHERE id = ?2",
+        params![scale, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -220,5 +242,22 @@ mod tests {
         assert!(!is_name_free(&conn, "办公区", None).unwrap());
         assert!(is_name_free(&conn, "办公区", Some(a.id)).unwrap());
         assert!(is_name_free(&conn, "别的", None).unwrap());
+    }
+
+    #[test]
+    fn set_scale_roundtrip_and_clear() {
+        let conn = init_in_memory().unwrap();
+        let z = create(&conn, "办公区").unwrap();
+        // 新建无覆盖
+        assert_eq!(list(&conn).unwrap()[0].scale, None);
+        // 设置覆盖 → 读回一致
+        set_scale(&conn, z.id, Some(1.2)).unwrap();
+        assert_eq!(list(&conn).unwrap()[0].scale, Some(1.2));
+        // 清除覆盖（跟随全局）→ 回到 None
+        set_scale(&conn, z.id, None).unwrap();
+        assert_eq!(list(&conn).unwrap()[0].scale, None);
+        // 范围兜底与存在性
+        assert!(set_scale(&conn, z.id, Some(3.0)).is_err());
+        assert!(set_scale(&conn, 9999, Some(1.0)).is_err());
     }
 }
