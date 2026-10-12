@@ -1071,8 +1071,10 @@ function onBeautify() {
     showToast?.('格式已经很规整了')
     return
   }
-  if (mode.value === 'wysiwyg') {
-    // 整篇单事务替换（一步撤销）；失败则不落任何改动
+  if (isLiveMode(mode.value)) {
+    // 整篇单事务替换（一步撤销）；失败则不落任何改动。
+    // 仅预览与实时预览共用同一 Crepe 实例，只读视图上程序化 dispatch 同样有效——
+    // 否则预览停留在旧内容，切回实时预览后一次编辑就会用旧文档覆盖美化结果
     if (!replaceWholeDocWithMarkdown(beautified)) {
       showToast?.('美化失败，请重试')
       return
@@ -1302,7 +1304,7 @@ function applyAiResult() {
   if (!md) return
   const restored = aiImagesRestored.value
   const selection = aiScope.value === 'selection'
-  if (mode.value === 'wysiwyg') {
+  if (isLiveMode(mode.value)) {
     const range = aiDocRange.value
     if (selection && range) {
       // 只替换选中片段（一步撤销）；失败不落任何改动
@@ -1311,7 +1313,9 @@ function applyAiResult() {
         return
       }
     } else {
-      // 整篇单事务替换（一步撤销）；失败不落任何改动
+      // 整篇单事务替换（一步撤销）；失败不落任何改动。
+      // 仅预览也走这里（选区捕获在只读态返回 null，恒为整篇）：同实例只换文档不重建，
+      // 光 adoptMarkdown 会保存新内容但预览停留旧文，切回实时预览后被一次编辑冲掉
       if (!replaceWholeDocWithMarkdown(md)) {
         showToast?.('应用失败，请重试')
         return

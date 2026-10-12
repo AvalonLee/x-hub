@@ -430,8 +430,12 @@ const ICON_SCALE_OPTIONS: AppSelectOption[] = [
   { value: '1.2', label: '大' },
   { value: '1.4', label: '特大' },
 ]
-/** 全局档位（config.suda_icon_scale；缺省/异常值回退 1.0） */
-const globalIconScale = computed(() => store.state.config.suda_icon_scale || 1)
+/** 全局档位（config.suda_icon_scale）：缺省/异常值回退 1，范围钳到 0.5–2.0（与后端
+ *  分区级 set_scale 校验同口径）——手改配置写入离谱值不再把界面尺寸撑爆 */
+const globalIconScale = computed(() => {
+  const s = store.state.config.suda_icon_scale
+  return typeof s === 'number' && Number.isFinite(s) ? Math.min(2, Math.max(0.5, s)) : 1
+})
 const iconScaleValue = computed<string>({
   get: () => String(globalIconScale.value),
   set: (v) => void store.setSudaIconScale(Number(v)),
