@@ -384,11 +384,14 @@ async function mountSplitPreview(content: string) {
     root.addEventListener('click', onEditorClick)
     // 图片右键「复制图片」同款口径
     root.addEventListener('contextmenu', onEditorContextMenu)
+    // 整图选中 Ctrl+C 同走位图复制（选区在预览实例上，见 onPreviewCopy）
+    root.addEventListener('copy', onPreviewCopy)
     // 已缓存图片不触发 load：挂载完按 attrs 同步一次宽度
     root.addEventListener('load', onPreviewImgLoad, true)
     detachPreviewListeners = () => {
       root.removeEventListener('click', onEditorClick)
       root.removeEventListener('contextmenu', onEditorContextMenu)
+      root.removeEventListener('copy', onPreviewCopy)
       root.removeEventListener('load', onPreviewImgLoad, true)
       detachPreviewListeners = () => {}
     }
@@ -1672,9 +1675,10 @@ async function copyImageFromUrl(src: string) {
 /** 整图节点选中（image-block / image-inline 的 NodeSelection）时 Ctrl+C：默认序列化
  *  只会把 xhub-note URL 塞进 text/html，粘到别处没有图——改写成系统剪贴板位图。
  *  混合选区（图 + 文）不拦截，仍走文本 + HTML 序列化；粘回编辑器经上传管线
- *  按内容哈希落同一文件，天然无损 */
-function onEditorCopy(e: ClipboardEvent) {
-  const c = crepe
+ *  按内容哈希落同一文件，天然无损。
+ *  按实例分流：主编辑区与分屏只读预览各查各 view 的选区——分屏模式下主实例已销毁
+ *  （crepe 为 null），两处监听必须各绑各的实例，共用这一份判定逻辑 */
+function onEditorCopyFor(c: Crepe | null, e: ClipboardEvent) {
   if (!c) return
   let imageSrc = ''
   c.editor.action((ctx) => {
@@ -1687,6 +1691,16 @@ function onEditorCopy(e: ClipboardEvent) {
   if (!imageSrc) return
   e.preventDefault()
   void copyImageFromUrl(imageSrc)
+}
+
+/** 主编辑区（实时预览/仅预览共用实例）的整图复制 */
+function onEditorCopy(e: ClipboardEvent) {
+  onEditorCopyFor(crepe, e)
+}
+
+/** 分屏只读预览实例的整图复制（右半边同样能形成图片选中态，选区在预览实例的 view 上） */
+function onPreviewCopy(e: ClipboardEvent) {
+  onEditorCopyFor(previewCrepe, e)
 }
 
 // ---- 图片右键菜单（复制图片）----
