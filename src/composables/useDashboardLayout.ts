@@ -120,6 +120,13 @@ export const DASH_MODULES: DashModuleDef[] = [
     variants: [v('note', '便签', 2, 1, 2, 2, '随手记')],
   },
   {
+    // 日记：回车即存入速记「日记」文件夹（缺失自动建，见 DiaryCard.vue）
+    id: 'diary',
+    title: '日记',
+    defaultVariant: 'input',
+    variants: [v('input', '随手记', 4, 2, 4, 2, '宽幅输入框，回车保存一篇日记')],
+  },
+  {
     id: 'notes',
     title: '速记概览',
     defaultVariant: 'overview',

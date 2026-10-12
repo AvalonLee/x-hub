@@ -7,6 +7,7 @@ import TodoCard from '../components/TodoCard.vue'
 import TodoCalendarCard from '../components/TodoCalendarCard.vue'
 import Suda from '../components/Suda.vue'
 import NotesOverviewCard from '../components/NotesOverviewCard.vue'
+import DiaryCard from '../components/DiaryCard.vue'
 import TodoOverviewCard from '../components/TodoOverviewCard.vue'
 import ResourcesOverviewCard from '../components/ResourcesOverviewCard.vue'
 import SudaCustomCard from '../components/SudaCustomCard.vue'
@@ -307,6 +308,7 @@ const dashCardComponents: Record<string, Component> = {
   sysmon: SysMonitorCard,
   sticky1: StickyCard,
   sticky2: StickyCard,
+  diary: DiaryCard,
   notes: NotesOverviewCard,
   todo_overview: TodoOverviewCard,
   resources: ResourcesOverviewCard,
@@ -377,6 +379,7 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
     case 'countdown':
       return { sizeW: p.w, sizeH: p.h, ...titleProps(p) }
     case 'sysmon':
+    case 'diary':
     case 'recent':
       return { ...titleProps(p) }
     default:

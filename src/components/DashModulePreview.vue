@@ -22,6 +22,7 @@ import {
   Globe,
   ListTodo,
   MemoryStick,
+  NotebookPen,
   PanelTopClose,
   Pin,
   Plus,
@@ -296,6 +297,16 @@ const kind = computed(() => {
       <div class="sticky-input">
         <span v-if="stickyText[stickySlot]" class="sticky-text">{{ stickyText[stickySlot] }}</span>
         <span v-else class="sticky-ph">随手记…</span>
+      </div>
+    </template>
+
+    <!-- ===== 日记（真实卡 = DiaryCard：标题 + 自动长高输入框，预览恒为空态占位） ===== -->
+    <template v-else-if="kind === 'diary'">
+      <header class="hd" :class="{ 'hd-float': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><NotebookPen class="ic" /><span>{{ title ?? '日记' }}</span></h3>
+      </header>
+      <div class="diary-input">
+        <span class="diary-ph">记一笔今天的日记，回车保存</span>
       </div>
     </template>
 
@@ -1101,6 +1112,25 @@ html[data-theme='dark'] .dpv {
   word-break: break-word;
 }
 .sticky-ph {
+  color: var(--text-4);
+}
+
+/* ---- 日记（真实卡 = DiaryCard：标题 + 自动长高输入框） ---- */
+.diary-input {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-soft);
+  background: var(--input-bg);
+  border-radius: var(--radius-md);
+  padding: calc(8 * var(--u));
+  font-size: calc(12 * var(--u));
+  line-height: 1.6;
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diary-ph {
   color: var(--text-4);
 }
 
